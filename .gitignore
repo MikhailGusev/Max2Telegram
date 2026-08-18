@@ -1,0 +1,38 @@
+# ---- секреты и локальные данные (НИКОГДА не коммитим) ----
+.env
+.env.*
+!.env.example
+*.session
+*.session.json
+max_session*.txt
+session/
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# ---- документы разработчика (не для публичного репо) ----
+SERVER_HANDOFF.md
+PROJECT_SUMMARY.md
+NOTES_*.md
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# ---- ide / os ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
