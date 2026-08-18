@@ -28,6 +28,11 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _csv(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 @dataclass(slots=True)
 class Config:
     telegram_token: str
@@ -50,6 +55,30 @@ class Config:
     db_path: Path
     log_level: str
     license_key: str
+
+    # --- платные каналы эскалации (Pro) ---
+    escalate_after_minutes: int
+    escalate_channels: tuple[str, ...]
+
+    sms_provider: str
+    sms_api_key: str
+    sms_login: str
+    sms_password: str
+    sms_from: str
+    sms_to: str
+
+    whatsapp_provider: str
+    whatsapp_token: str
+    whatsapp_phone_id: str
+    whatsapp_to: str
+    whatsapp_template: str
+    waha_url: str
+    waha_session: str
+
+    wa_webhook_enabled: bool
+    wa_webhook_host: str
+    wa_webhook_port: int
+    wa_verify_token: str
 
     session_path: Path = field(init=False)
 
@@ -95,4 +124,23 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         db_path=Path(os.getenv("DB_PATH", "data/maxbridge.db")),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         license_key=os.getenv("MAXBRIDGE_LICENSE_KEY", "").strip(),
+        escalate_after_minutes=_int("ESCALATE_AFTER_MINUTES", 0),
+        escalate_channels=_csv("ESCALATE_CHANNELS"),
+        sms_provider=os.getenv("SMS_PROVIDER", "").strip().lower(),
+        sms_api_key=os.getenv("SMS_API_KEY", "").strip(),
+        sms_login=os.getenv("SMS_LOGIN", "").strip(),
+        sms_password=os.getenv("SMS_PASSWORD", "").strip(),
+        sms_from=os.getenv("SMS_FROM", "").strip(),
+        sms_to=os.getenv("SMS_TO", "").strip(),
+        whatsapp_provider=os.getenv("WHATSAPP_PROVIDER", "").strip().lower(),
+        whatsapp_token=os.getenv("WHATSAPP_TOKEN", "").strip(),
+        whatsapp_phone_id=os.getenv("WHATSAPP_PHONE_ID", "").strip(),
+        whatsapp_to=os.getenv("WHATSAPP_TO", "").strip(),
+        whatsapp_template=os.getenv("WHATSAPP_TEMPLATE", "").strip(),
+        waha_url=os.getenv("WAHA_URL", "").strip(),
+        waha_session=os.getenv("WAHA_SESSION", "default").strip(),
+        wa_webhook_enabled=_bool("WA_WEBHOOK_ENABLED", False),
+        wa_webhook_host=os.getenv("WA_WEBHOOK_HOST", "127.0.0.1").strip(),
+        wa_webhook_port=_int("WA_WEBHOOK_PORT", 8081),
+        wa_verify_token=os.getenv("WA_VERIFY_TOKEN", "").strip(),
     )

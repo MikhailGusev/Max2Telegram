@@ -1,0 +1,23 @@
+[Unit]
+Description=MaxBridge — мост MAX <-> Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/maxbridge
+ExecStart=/root/maxbridge/.venv/bin/python -m maxbridge
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+
+# журнал ведёт systemd: journalctl -u maxbridge -f
+StandardOutput=journal
+StandardError=journal
+
+# .env и сессия MAX содержат секреты — читает только владелец процесса
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -136,16 +136,26 @@ JSON-RPC вида `{ver, cmd, seq, opcode, payload}`. Протокол отре�
 - [x] `maxbridge/maxproto/` — опкоды + асинхронный WS-клиент MAX (логин, приём
       всех сообщений, отправка, реакции, стелс-режим, переподключение)
 
-Дальше по порядку:
-- [ ] `transports/base.py` + `userbot.py` + `botapi.py` — единый интерфейс транспорта
-- [ ] `telegram/bridge.py` — aiogram 3: темы форума, ответы, команды, кнопки
-- [ ] `core/router.py` — маршрутизация в обе стороны, дедупликация
-- [ ] `core/rules.py`, `core/ai.py` (Claude), `core/digest.py`, `core/search.py`,
-      `core/followup.py`, `core/licensing.py`
-- [ ] `maxbridge/__main__.py` + `cli/login.py` — запуск и интерактивный логин в MAX
-- [ ] `README.md` (публичный), `docs/LEGAL.md`, `docs/DEPLOY.md`, `COMMERCIAL.md`
-- [ ] `deploy/maxbridge.service` (systemd по образцу telegram-bot-3), Dockerfile
-- [ ] тесты на правила и маппинг тем
+- [x] `transports/` — единый интерфейс + userbot + botapi
+- [x] `telegram/bridge.py` — aiogram 3: темы форума, ответы, команды, кнопки
+- [x] `core/router.py` — маршрутизация в обе стороны, дедупликация
+- [x] `core/rules.py`, `core/ai.py` (Claude), `core/digest.py`,
+      `core/followup.py`, `core/escalation.py`, `core/licensing.py`
+- [x] `channels/` — SMS (sms.ru, smsc.ru, Twilio) и WhatsApp (Cloud API, WAHA)
+- [x] `app.py`, `__main__.py`, `cli/login.py`, `cli/check.py`
+- [x] `README.md`, `docs/LEGAL.md`, `docs/DEPLOY.md`, `COMMERCIAL.md`
+- [x] `deploy/maxbridge.service`
+- [x] тесты: правила, хранилище, лицензии и каналы (23 шт., зелёные)
+- [x] сквозная проверка: приём → приоритет → доставка → поиск → эскалация
+
+Осталось:
+- [ ] выпуск лицензионных ключей: скрипт подписи Ed25519 + публичный ключ
+      вендора в `licensing.VENDOR_PUBLIC_KEY` (приватный ключ — вне репозитория)
+- [ ] медиа: сейчас вложения показываются ссылкой, перекладывание файлов
+      MAX ↔ Telegram не сделано
+- [ ] голосовые → текст (стыковка с ASR из txt2word)
+- [ ] мультиаккаунт (несколько владельцев на одном сервере)
+- [ ] Dockerfile
 - [ ] **спросить владельца перед созданием публичного репо и первым push**
 
 Возобновление: «продолжай MaxBridge» — беру следующий незакрытый пункт.

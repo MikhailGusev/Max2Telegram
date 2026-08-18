@@ -90,7 +90,15 @@ class Storage:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
             self._db.commit()
+
+    def _migrate(self) -> None:
+        """Добавляет колонки, появившиеся после первых установок."""
+        existing = {row["name"] for row in self._db.execute("PRAGMA table_info(messages)")}
+        for column, ddl in (("escalated", "INTEGER NOT NULL DEFAULT 0"),):
+            if column not in existing:
+                self._db.execute(f"ALTER TABLE messages ADD COLUMN {column} {ddl}")
 
     def close(self) -> None:
         with self._lock:
@@ -219,6 +227,29 @@ class Storage:
                     (older_than_ts,),
                 ).fetchall()
             )
+
+    def pending_escalation(self, older_than_ts: int) -> list[sqlite3.Row]:
+        """Срочные входящие, на которые не ответили и ещё не эскалировали."""
+        with self._lock:
+            return list(
+                self._db.execute(
+                    "SELECT m.*, c.title AS chat_title FROM messages m"
+                    " LEFT JOIN chats c ON c.max_chat_id = m.max_chat_id"
+                    " WHERE m.priority = 'urgent' AND m.answered = 0 AND m.outgoing = 0"
+                    " AND m.escalated = 0 AND m.ts <= ? ORDER BY m.ts",
+                    (older_than_ts,),
+                ).fetchall()
+            )
+
+    def mark_escalated(self, row_ids: Iterable[int]) -> None:
+        ids = list(row_ids)
+        if not ids:
+            return
+        with self._lock:
+            self._db.executemany(
+                "UPDATE messages SET escalated = 1 WHERE id = ?", [(i,) for i in ids]
+            )
+            self._db.commit()
 
     def search(self, query: str, limit: int = 20) -> list[sqlite3.Row]:
         with self._lock:
