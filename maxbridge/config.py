@@ -85,10 +85,18 @@ class Config:
     asr_model: str
     asr_lang: str
 
+    #: явный путь к сессии MAX. Пусто -> рядом с базой. Мультиаккаунт задаёт
+    #: своё значение каждому аккаунту, иначе они затрут сессии друг друга.
+    session_file: str = ""
+
     session_path: Path = field(init=False)
 
     def __post_init__(self) -> None:
-        self.session_path = self.db_path.parent / "max_session.json"
+        self.session_path = (
+            Path(self.session_file)
+            if self.session_file
+            else self.db_path.parent / "max_session.json"
+        )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -152,4 +160,5 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         asr_key=os.getenv("ASR_KEY", "").strip(),
         asr_model=os.getenv("ASR_MODEL", "whisper-1").strip(),
         asr_lang=os.getenv("ASR_LANG", "ru").strip(),
+        session_file=os.getenv("MAX_SESSION_FILE", "").strip(),
     )

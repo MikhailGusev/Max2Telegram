@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 
 from ..channels import build_channels
+from ..cli.login import _configs
 from ..config import load_config
 from ..core.licensing import load_license
 from ..db import Storage
@@ -28,15 +29,25 @@ async def check_flow() -> int:
     else:
         print("Конфигурация: ✓")
 
-    print(f"\nРежим MAX: {config.max_mode}")
-    if config.max_mode == "userbot":
-        exists = config.session_path.exists()
-        print(f"  сессия {config.session_path}: {'✓ есть' if exists else '✗ нет'}")
-        if not exists:
-            print("  -> выполни: python -m maxbridge login")
-        print("  охват: все сообщения аккаунта")
-    else:
-        print("  охват: только сообщения, адресованные боту")
+    license_ = load_license(config.license_key)
+    accounts = _configs(config)
+
+    print(f"\nАккаунтов MAX: {len(accounts)}")
+    if len(accounts) > 1 and not license_.allows("multiaccount"):
+        print("  ⚠ мультиаккаунт входит в тариф Team — поднимется только первый")
+    for name, account_cfg in accounts.items():
+        print(f"\n  [{name}] режим {account_cfg.max_mode}")
+        if account_cfg.max_mode == "userbot":
+            exists = account_cfg.session_path.exists()
+            print(f"    сессия: {'✓ есть' if exists else '✗ нет'} ({account_cfg.session_path})")
+            if not exists:
+                suffix = f" --account {name}" if len(accounts) > 1 else ""
+                print(f"    -> выполни: python -m maxbridge login{suffix}")
+            print("    охват: все сообщения аккаунта")
+        else:
+            print("    охват: только сообщения, адресованные боту")
+        if not account_cfg.forum_chat_id:
+            print("    ⚠ группа-приёмник не задана — выполни /bind в нужной группе")
 
     print(f"\nAI: {'✓ включён' if config.ai_active else '✗ выключен (нет ANTHROPIC_API_KEY)'}")
     if config.ai_active:
@@ -51,7 +62,6 @@ async def check_flow() -> int:
     print(f"Ежедневная сводка: {config.digest_hour if config.digest_hour >= 0 else 'выключена'}")
     print(f"Радар незакрытых: {config.followup_minutes or 'выключен'} мин")
 
-    license_ = load_license(config.license_key)
     print(f"\nЛицензия: {license_.describe()}")
 
     channels = build_channels(config)

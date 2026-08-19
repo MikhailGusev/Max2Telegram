@@ -1,0 +1,17 @@
+[
+  {
+    "name": "work",
+    "owner_id": 111111111,
+    "forum_chat_id": -1001111111111,
+    "max_phone": "+79990000001",
+    "stealth_mode": true
+  },
+  {
+    "name": "personal",
+    "owner_id": 111111111,
+    "forum_chat_id": -1002222222222,
+    "max_phone": "+79990000002",
+    "digest_hour": -1,
+    "followup_minutes": 0
+  }
+]

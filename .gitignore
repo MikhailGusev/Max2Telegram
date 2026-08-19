@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+# описание аккаунтов: телефоны и id владельцев
+accounts.json
+!accounts.json.example
 *.session
 *.session.json
 max_session*.txt

@@ -4,6 +4,10 @@
 в теме, как в обычной переписке, — текст уходит в тот же чат MAX от его имени.
 Никаких команд для ответа не нужно.
 
+Один бот обслуживает сколько угодно аккаунтов MAX: у каждого своя группа-форум,
+и по её id мост понимает, чей это чат. Аккаунт определяется тем, где написано
+сообщение, поэтому переключать «текущий аккаунт» руками не нужно.
+
 Требования к группе: супергруппа с включёнными Темами (Topics), бот — админ
 с правом «Управление темами».
 """
@@ -26,13 +30,13 @@ from aiogram.types import (
     ReactionTypeEmoji,
 )
 
+from ..accounts import Account, AccountRegistry
 from ..config import Config
 from ..core.ai import AiAssistant
+from ..core.digest import build_digest
 from ..core.licensing import License
-from ..core.router import Router
 from ..core.rules import Verdict
 from ..core.transcribe import Transcriber
-from ..db import Storage
 from ..models import MaxMessage
 
 log = logging.getLogger("maxbridge.telegram")
@@ -43,47 +47,65 @@ PRIORITY_MARK = {"urgent": "🔥", "normal": "", "low": "· "}
 MAX_TELEGRAM_UPLOAD = 50 * 1024 * 1024
 
 
+class AccountSink:
+    """Адаптер: роутер аккаунта отдаёт сообщения в общий Telegram-бот."""
+
+    def __init__(self, bridge: "TelegramBridge", account: Account) -> None:
+        self.bridge = bridge
+        self.account = account
+
+    async def deliver(self, message: MaxMessage, verdict: Verdict) -> int | None:
+        return await self.bridge.deliver(self.account, message, verdict)
+
+
 class TelegramBridge:
     def __init__(
         self,
         config: Config,
-        storage: Storage,
-        router: Router,
+        accounts: AccountRegistry,
         ai: AiAssistant,
         license_: License,
         transcriber: Transcriber | None = None,
     ) -> None:
         self.config = config
-        self.storage = storage
-        self.router = router
+        self.accounts = accounts
         self.ai = ai
         self.license = license_
         self.transcriber = transcriber or Transcriber()
         self.bot = Bot(token=config.telegram_token)
         self.dp = Dispatcher()
-        self._drafts: dict[int, list[str]] = {}
+        self._drafts: dict[tuple[str, int], list[str]] = {}
         self._register()
 
+        for account in self.accounts:
+            account.router.attach_telegram(AccountSink(self, account))
+
     # ------------------------------------------------------------- доставка
-    async def deliver(self, message: MaxMessage, verdict: Verdict) -> int | None:
-        """Кладёт входящее MAX-сообщение в его тему. Возвращает id в Telegram."""
-        if not self.config.forum_chat_id:
-            log.warning("не задан TELEGRAM_FORUM_CHAT_ID — сообщение некуда положить")
+    async def deliver(
+        self, account: Account, message: MaxMessage, verdict: Verdict
+    ) -> int | None:
+        """Кладёт входящее MAX-сообщение в тему его чата."""
+        if not account.forum_chat_id:
+            log.warning(
+                "аккаунт «%s»: не задана группа-приёмник, сообщение некуда положить. "
+                "Выполни /bind в нужной группе",
+                account.name,
+            )
             return None
 
-        topic_id = await self._ensure_topic(message)
+        topic_id = await self._ensure_topic(account, message)
         text = self._render(message, verdict)
-        keyboard = self._keyboard(message, verdict)
+        keyboard = self._keyboard(account, message, verdict)
 
-        if message.attachments and self.router.transport.supports_media:
-            sent_id = await self._deliver_media(message, topic_id, text, keyboard)
+        if message.attachments and account.transport.supports_media:
+            sent_id = await self._deliver_media(account, message, topic_id, text, keyboard)
             if sent_id is not None:
                 return sent_id
             # не получилось перетащить файл — ниже уйдёт текст со ссылкой
 
         try:
             sent = await self.bot.send_message(
-                chat_id=self.config.forum_chat_id,
+                chat_id=account.forum_chat_id,
                 message_thread_id=topic_id,
                 text=text,
                 parse_mode="HTML",
@@ -93,10 +115,10 @@ class TelegramBridge:
         except TelegramBadRequest as exc:
             # тему могли удалить руками — заводим заново и пробуем ещё раз
             if "thread not found" in str(exc).lower():
-                self.storage.bind_topic(message.chat_id, 0)
-                topic_id = await self._ensure_topic(message)
+                account.storage.bind_topic(message.chat_id, 0)
+                topic_id = await self._ensure_topic(account, message)
                 sent = await self.bot.send_message(
-                    chat_id=self.config.forum_chat_id,
+                    chat_id=account.forum_chat_id,
                     message_thread_id=topic_id,
                     text=text,
                     parse_mode="HTML",
@@ -108,6 +130,7 @@ class TelegramBridge:
 
     async def _deliver_media(
         self,
+        account: Account,
         message: MaxMessage,
         topic_id: int,
         caption: str,
@@ -120,14 +143,16 @@ class TelegramBridge:
         """
         attachment = message.attachments[0]
         try:
-            data, filename = await self.router.transport.fetch_attachment(message, 0)
+            data, filename = await account.transport.fetch_attachment(message, 0)
         except Exception as exc:  # noqa: BLE001
             log.warning("вложение «%s» не скачалось: %s", attachment.kind, exc)
             return None
 
         if len(data) > MAX_TELEGRAM_UPLOAD:
-            log.info("вложение %.1f МБ больше лимита Telegram — отправляю ссылкой",
-                     len(data) / 1024 / 1024)
+            log.info(
+                "вложение %.1f МБ больше лимита Telegram — отправляю ссылкой",
+                len(data) / 1024 / 1024,
+            )
             return None
 
         # голосовое приходит текстом: его можно прочитать глазами, найти
@@ -136,7 +161,7 @@ class TelegramBridge:
             recognized = await self.transcriber.transcribe(data, filename)
             if recognized:
                 caption = f"{caption}\n\n🎧 <i>{html.escape(recognized)}</i>"
-                self.storage.save_transcript(
+                account.storage.save_transcript(
                     message.chat_id, str(message.message_id), recognized
                 )
 
@@ -144,7 +169,7 @@ class TelegramBridge:
         # у медиа лимит подписи 1024 символа, у текста — 4096
         short = caption if len(caption) <= 1024 else caption[:1021] + "..."
         common: dict[str, Any] = {
-            "chat_id": self.config.forum_chat_id,
+            "chat_id": account.forum_chat_id,
             "message_thread_id": topic_id,
             "caption": short,
             "parse_mode": "HTML",
@@ -166,23 +191,28 @@ class TelegramBridge:
 
         if len(message.attachments) > 1:
             await self.bot.send_message(
-                chat_id=self.config.forum_chat_id,
+                chat_id=account.forum_chat_id,
                 message_thread_id=topic_id,
                 text=f"…и ещё вложений: {len(message.attachments) - 1}",
             )
         return sent.message_id
 
-    async def _ensure_topic(self, message: MaxMessage) -> int:
-        chat = self.storage.get_chat(message.chat_id)
+    async def _ensure_topic(self, account: Account, message: MaxMessage) -> int:
+        chat = account.storage.get_chat(message.chat_id)
         if chat is not None and chat["tg_topic_id"]:
             return int(chat["tg_topic_id"])
 
         title = message.chat_title or message.sender_name or f"MAX {message.chat_id}"
         created = await self.bot.create_forum_topic(
-            chat_id=self.config.forum_chat_id, name=title[:128]
+            chat_id=account.forum_chat_id, name=title[:128]
         )
-        self.storage.bind_topic(message.chat_id, created.message_thread_id)
-        log.info("создана тема «%s» для чата MAX %s", title, message.chat_id)
+        account.storage.bind_topic(message.chat_id, created.message_thread_id)
+        log.info(
+            "аккаунт «%s»: создана тема «%s» для чата MAX %s",
+            account.name,
+            title,
+            message.chat_id,
+        )
         return created.message_thread_id
 
     def _render(self, message: MaxMessage, verdict: Verdict) -> str:
@@ -195,23 +225,25 @@ class TelegramBridge:
         for attachment in message.attachments:
             label = attachment.name or attachment.kind
             if attachment.url:
-                parts.append(f'📎 <a href="{html.escape(attachment.url)}">{html.escape(label)}</a>')
+                parts.append(
+                    f'📎 <a href="{html.escape(attachment.url)}">{html.escape(label)}</a>'
+                )
             else:
                 parts.append(f"📎 {html.escape(label)}")
         if verdict.reason and verdict.priority == "urgent":
             parts.append(f"<i>{html.escape(verdict.reason)}</i>")
         return "\n".join(parts)
 
-    def _keyboard(self, message: MaxMessage, verdict: Verdict) -> InlineKeyboardMarkup | None:
+    def _keyboard(
+        self, account: Account, message: MaxMessage, verdict: Verdict
+    ) -> InlineKeyboardMarkup | None:
         buttons: list[list[InlineKeyboardButton]] = []
         row: list[InlineKeyboardButton] = []
         if self.ai.enabled and verdict.needs_reply:
             row.append(
-                InlineKeyboardButton(
-                    text="✍️ Черновики", callback_data=f"draft:{message.chat_id}"
-                )
+                InlineKeyboardButton(text="✍️ Черновики", callback_data=f"draft:{message.chat_id}")
             )
-        if self.config.stealth_mode:
+        if account.config.stealth_mode:
             row.append(
                 InlineKeyboardButton(
                     text="👁 Прочитано",
@@ -228,16 +260,44 @@ class TelegramBridge:
         )
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+    # -------------------------------------------------------- выбор аккаунта
+    def _account_for(self, event: Message | CallbackQuery) -> Account | None:
+        """Аккаунт определяется тем, где написано сообщение.
+
+        В группе — по её id. В личке с ботом — единственный аккаунт владельца;
+        если их несколько, команду нужно писать в нужной группе.
+        """
+        chat = event.chat if isinstance(event, Message) else (
+            event.message.chat if event.message is not None else None
+        )
+        if chat is not None:
+            account = self.accounts.by_forum(chat.id)
+            if account is not None:
+                return account
+
+        user = event.from_user
+        if user is None:
+            return None
+        owned = self.accounts.owned_by(user.id)
+        return owned[0] if len(owned) == 1 else None
+
+    async def _need_account(self, message: Message) -> Account | None:
+        account = self._account_for(message)
+        if account is None:
+            names = ", ".join(acc.name for acc in self.accounts.owned_by(message.from_user.id))
+            await message.answer(
+                "У тебя несколько аккаунтов MAX, поэтому непонятно, к какому "
+                f"относится команда: {names}.\nНапиши её в группе нужного аккаунта."
+            )
+        return account
+
     # ------------------------------------------------------------ обработчики
     def _register(self) -> None:
-        dp, owner = self.dp, self.config.owner_id
-
-        def mine(message: Message) -> bool:
-            return bool(message.from_user and message.from_user.id == owner)
-
+        dp = self.dp
         dp.message.register(self._cmd_start, CommandStart())
         dp.message.register(self._cmd_bind, Command("bind"))
         dp.message.register(self._cmd_status, Command("status"))
+        dp.message.register(self._cmd_accounts, Command("accounts"))
         dp.message.register(self._cmd_chats, Command("chats"))
         dp.message.register(self._cmd_find, Command("find"))
         dp.message.register(self._cmd_digest, Command("digest"))
@@ -257,7 +317,7 @@ class TelegramBridge:
 
     async def _guard(self, event: Message | CallbackQuery) -> bool:
         user = event.from_user
-        if user is not None and user.id == self.config.owner_id:
+        if user is not None and self.accounts.is_owner(user.id):
             return True
         if isinstance(event, CallbackQuery):
             await event.answer("Этот мост чужой", show_alert=True)
@@ -276,10 +336,12 @@ class TelegramBridge:
     async def _cmd_help(self, message: Message) -> None:
         if not await self._guard(message):
             return
+        extra = "/accounts — список аккаунтов MAX\n" if self.accounts.multi else ""
         await message.answer(
             "<b>Что умею</b>\n"
             "/bind — привязать эту группу-форум как приёмник\n"
             "/status — состояние моста и статистика\n"
+            f"{extra}"
             "/chats — список чатов MAX и их тем\n"
             "/find слово — поиск по всей истории MAX\n"
             "/digest — сводка «что я пропустил» за сутки\n"
@@ -294,29 +356,73 @@ class TelegramBridge:
     async def _cmd_bind(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        chat_id = message.chat.id
-        self.storage.set("forum_chat_id", str(chat_id))
-        self.config.forum_chat_id = chat_id
+
+        owned = self.accounts.owned_by(message.from_user.id)
+        argument = (message.text or "").partition(" ")[2].strip()
+        if argument:
+            account = self.accounts.by_name(argument)
+            if account is None:
+                await message.answer(f"Аккаунта «{argument}» нет. Есть: " + ", ".join(
+                    acc.name for acc in owned
+                ))
+                return
+        elif len(owned) == 1:
+            account = owned[0]
+        else:
+            await message.answer(
+                "Укажи, какой аккаунт привязать к этой группе: /bind имя\n"
+                "Доступны: " + ", ".join(acc.name for acc in owned)
+            )
+            return
+
+        self.accounts.rebind(account, message.chat.id)
+        account.storage.set("forum_chat_id", str(message.chat.id))
+        hint = (
+            f"«{account.name}»: пропиши в accounts.json"
+            if self.accounts.multi
+            else "пропиши в .env"
+        )
         await message.answer(
-            f"Готово. Эта группа стала приёмником.\n"
-            f"Пропиши в .env, чтобы пережить перезапуск:\n"
-            f"<code>TELEGRAM_FORUM_CHAT_ID={chat_id}</code>",
+            f"Готово. Эта группа принимает аккаунт {hint}, чтобы пережить перезапуск:\n"
+            f"<code>{message.chat.id}</code>",
             parse_mode="HTML",
         )
+
+    async def _cmd_accounts(self, message: Message) -> None:
+        if not await self._guard(message):
+            return
+        lines = []
+        for account in self.accounts.owned_by(message.from_user.id):
+            stats = account.storage.stats()
+            bound = "группа привязана" if account.forum_chat_id else "⚠ группа не привязана"
+            lines.append(
+                f"<b>{html.escape(account.name)}</b> — {account.transport.name}, {bound}\n"
+                f"чатов {stats['chats']}, сообщений {stats['messages']}, "
+                f"ждут ответа {stats['pending']}"
+            )
+        await message.answer("\n\n".join(lines) or "Аккаунтов нет.", parse_mode="HTML")
 
     async def _cmd_status(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        state = self.router.describe_state()
-        coverage = "все сообщения аккаунта" if state["sees_everything"] else "только адресованное боту"
-        await message.answer(
-            f"<b>Транспорт:</b> {state['transport']} — {coverage}\n"
-            f"<b>Стелс:</b> {'да' if state['stealth'] else 'нет'}\n"
-            f"<b>AI:</b> {'включён' if state['ai'] else 'выключен'}\n"
-            f"<b>Чатов:</b> {state['chats']}  <b>Сообщений:</b> {state['messages']}\n"
-            f"<b>Отправлено:</b> {state['sent']}  <b>Ждут ответа:</b> {state['pending']}",
-            parse_mode="HTML",
-        )
+        blocks = []
+        for account in self.accounts.owned_by(message.from_user.id):
+            state = account.router.describe_state()
+            coverage = (
+                "все сообщения аккаунта"
+                if state["sees_everything"]
+                else "только адресованное боту"
+            )
+            title = f"<b>{html.escape(account.name)}</b>\n" if self.accounts.multi else ""
+            blocks.append(
+                f"{title}"
+                f"<b>Транспорт:</b> {state['transport']} — {coverage}\n"
+                f"<b>Стелс:</b> {'да' if state['stealth'] else 'нет'}\n"
+                f"<b>AI:</b> {'включён' if state['ai'] else 'выключен'}\n"
+                f"<b>Чатов:</b> {state['chats']}  <b>Сообщений:</b> {state['messages']}\n"
+                f"<b>Отправлено:</b> {state['sent']}  <b>Ждут ответа:</b> {state['pending']}"
+            )
+        await message.answer("\n\n".join(blocks), parse_mode="HTML")
 
     async def _cmd_license(self, message: Message) -> None:
         if not await self._guard(message):
@@ -326,7 +432,10 @@ class TelegramBridge:
     async def _cmd_chats(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        rows = self.storage.list_chats()
+        account = await self._need_account(message)
+        if account is None:
+            return
+        rows = account.storage.list_chats()
         if not rows:
             await message.answer("Пока ни одного чата — жду первое сообщение из MAX.")
             return
@@ -343,28 +452,38 @@ class TelegramBridge:
         if not query:
             await message.answer("Что ищем? Например: /find договор")
             return
-        rows = self.storage.search(query)
-        if not rows:
-            await message.answer("Ничего не нашлось.")
-            return
-        lines = []
-        for row in rows[:15]:
-            who = row["sender_name"] or ("я" if row["outgoing"] else "?")
-            chat = row["chat_title"] or row["max_chat_id"]
-            preview = " ".join((row["text"] or "").split())[:90]
-            lines.append(f"<b>{html.escape(str(chat))}</b> · {html.escape(who)}\n{html.escape(preview)}")
-        await message.answer("\n\n".join(lines), parse_mode="HTML")
+
+        # искать удобнее сразу по всем своим аккаунтам
+        blocks: list[str] = []
+        for account in self.accounts.owned_by(message.from_user.id):
+            rows = account.storage.search(query, limit=10)
+            for row in rows:
+                who = row["sender_name"] or ("я" if row["outgoing"] else "?")
+                chat = row["chat_title"] or row["max_chat_id"]
+                prefix = f"[{account.name}] " if self.accounts.multi else ""
+                preview = " ".join((row["text"] or "").split())[:90]
+                blocks.append(
+                    f"{prefix}<b>{html.escape(str(chat))}</b> · {html.escape(who)}\n"
+                    f"{html.escape(preview)}"
+                )
+        await message.answer("\n\n".join(blocks[:15]) or "Ничего не нашлось.", parse_mode="HTML")
 
     async def _cmd_digest(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        from ..core.digest import build_digest
-
-        text = await build_digest(self.storage, self.ai, hours=24)
-        await message.answer(text or "За сутки ничего важного.", parse_mode="HTML")
+        blocks = []
+        for account in self.accounts.owned_by(message.from_user.id):
+            text = await build_digest(account.storage, self.ai, hours=24)
+            if text:
+                head = f"<b>[{html.escape(account.name)}]</b>\n" if self.accounts.multi else ""
+                blocks.append(head + text)
+        await message.answer("\n\n".join(blocks) or "За сутки ничего важного.", parse_mode="HTML")
 
     async def _cmd_rule(self, message: Message) -> None:
         if not await self._guard(message):
+            return
+        account = await self._need_account(message)
+        if account is None:
             return
         payload = (message.text or "").partition(" ")[2].strip()
         if "|" not in payload:
@@ -375,19 +494,21 @@ class TelegramBridge:
             )
             return
         pattern, _, action_raw = payload.partition("|")
-        action_raw = action_raw.strip()
-        action, _, value = action_raw.partition("=")
+        action, _, value = action_raw.strip().partition("=")
         action = action.strip().lower()
         if action not in {"urgent", "mute", "autoreply"}:
             await message.answer("Не знаю такое действие. Есть: urgent, mute, autoreply=текст")
             return
-        rule_id = self.storage.add_rule(pattern.strip(), action, value.strip())
+        rule_id = account.storage.add_rule(pattern.strip(), action, value.strip())
         await message.answer(f"Правило #{rule_id} создано.")
 
     async def _cmd_rules(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        rows = self.storage.list_rules()
+        account = await self._need_account(message)
+        if account is None:
+            return
+        rows = account.storage.list_rules()
         if not rows:
             await message.answer("Правил пока нет.")
             return
@@ -401,50 +522,54 @@ class TelegramBridge:
     async def _cmd_rmrule(self, message: Message) -> None:
         if not await self._guard(message):
             return
+        account = await self._need_account(message)
+        if account is None:
+            return
         raw = (message.text or "").partition(" ")[2].strip()
         if not raw.isdigit():
             await message.answer("Формат: /rmrule 3")
             return
-        ok = self.storage.delete_rule(int(raw))
-        await message.answer("Удалил." if ok else "Такого правила нет.")
+        await message.answer("Удалил." if account.storage.delete_rule(int(raw)) else "Такого правила нет.")
 
     async def _cmd_autoreply(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        if message.message_thread_id is None:
+        account = self.accounts.by_forum(message.chat.id)
+        if account is None or message.message_thread_id is None:
             await message.answer("Эту команду нужно писать внутри темы нужного чата.")
             return
-        chat = self.storage.chat_by_topic(message.message_thread_id)
+        chat = account.storage.chat_by_topic(message.message_thread_id)
         if chat is None:
             await message.answer("Не понял, какому чату MAX принадлежит эта тема.")
             return
         text = (message.text or "").partition(" ")[2].strip()
-        self.storage.set_chat_flag(int(chat["max_chat_id"]), "autoreply", text)
+        account.storage.set_chat_flag(int(chat["max_chat_id"]), "autoreply", text)
         await message.answer("Автоответ выключен." if not text else f"Автоответ: {text}")
 
     # ------------------------------------------------------- ответ из темы
     async def _on_topic_reply(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        if message.chat.id != self.config.forum_chat_id:
+        account = self.accounts.by_forum(message.chat.id)
+        if account is None:
             return
         text = (message.text or "").strip()
         if not text or text.startswith("/"):
             return
 
-        chat = self.storage.chat_by_topic(message.message_thread_id or 0)
+        chat = account.storage.chat_by_topic(message.message_thread_id or 0)
         if chat is None:
             await message.reply("Не знаю, в какой чат MAX это отправить.")
             return
 
         reply_to = ""
         if message.reply_to_message is not None:
-            origin = self.storage.max_msg_by_tg(message.reply_to_message.message_id)
+            origin = account.storage.max_msg_by_tg(message.reply_to_message.message_id)
             if origin is not None:
                 reply_to = origin["max_msg_id"]
 
         try:
-            await self.router.send_to_max(int(chat["max_chat_id"]), text, reply_to=reply_to)
+            await account.router.send_to_max(int(chat["max_chat_id"]), text, reply_to=reply_to)
         except Exception as exc:  # noqa: BLE001
             log.exception("не смог отправить в MAX")
             await message.reply(f"Не ушло: {exc}")
@@ -460,14 +585,15 @@ class TelegramBridge:
         """Фото или файл, отправленный в тему, уходит в тот же чат MAX."""
         if not await self._guard(message):
             return
-        if message.chat.id != self.config.forum_chat_id:
+        account = self.accounts.by_forum(message.chat.id)
+        if account is None:
             return
 
-        chat = self.storage.chat_by_topic(message.message_thread_id or 0)
+        chat = account.storage.chat_by_topic(message.message_thread_id or 0)
         if chat is None:
             await message.reply("Не знаю, в какой чат MAX это отправить.")
             return
-        if not self.router.transport.supports_media:
+        if not account.transport.supports_media:
             await message.reply("Текущий транспорт MAX не умеет отправлять файлы.")
             return
 
@@ -494,7 +620,7 @@ class TelegramBridge:
             return
 
         try:
-            await self.router.send_media_to_max(
+            await account.router.send_media_to_max(
                 int(chat["max_chat_id"]),
                 data,
                 filename=filename,
@@ -515,42 +641,51 @@ class TelegramBridge:
     async def _on_callback(self, query: CallbackQuery) -> None:
         if not await self._guard(query):
             return
+        account = self._account_for(query)
+        if account is None:
+            await query.answer("Не понял, к какому аккаунту относится кнопка", show_alert=True)
+            return
+
         data = query.data or ""
         action, _, rest = data.partition(":")
 
         if action == "mute":
-            self.storage.set_chat_flag(int(rest), "muted", 1)
+            account.storage.set_chat_flag(int(rest), "muted", 1)
             await query.answer("Чат приглушён")
         elif action == "vip":
-            self.storage.set_chat_flag(int(rest), "vip", 1)
+            account.storage.set_chat_flag(int(rest), "vip", 1)
             await query.answer("Чат помечен важным")
         elif action == "read":
             chat_id, _, msg_id = rest.partition(":")
             try:
-                await self.router.transport.mark_read(int(chat_id), msg_id)
+                await account.transport.mark_read(int(chat_id), msg_id)
                 await query.answer("Отмечено прочитанным в MAX")
             except Exception:  # noqa: BLE001
                 await query.answer("Не получилось", show_alert=True)
         elif action == "draft":
-            await self._make_drafts(query, int(rest))
+            await self._make_drafts(query, account, int(rest))
         elif action == "send":
-            await self._send_draft(query, rest)
+            await self._send_draft(query, account, rest)
         else:
             await query.answer()
 
-    async def _make_drafts(self, query: CallbackQuery, chat_id: int) -> None:
+    async def _make_drafts(self, query: CallbackQuery, account: Account, chat_id: int) -> None:
         await query.answer("Думаю…")
-        history = self.router.context_lines(chat_id)
+        history = account.router.context_lines(chat_id)
         incoming = history[-1] if history else ""
         drafts = await self.ai.drafts(history, incoming)
         if not drafts:
             await query.answer("Не смог придумать ответ", show_alert=True)
             return
 
-        key = chat_id
+        key = (account.name, chat_id)
         self._drafts[key] = [d.text for d in drafts]
         buttons = [
-            [InlineKeyboardButton(text=f"▶ {d.tone[:24]}", callback_data=f"send:{key}:{i}")]
+            [
+                InlineKeyboardButton(
+                    text=f"▶ {d.tone[:24]}", callback_data=f"send:{chat_id}:{i}"
+                )
+            ]
             for i, d in enumerate(drafts)
         ]
         body = "\n\n".join(
@@ -558,19 +693,21 @@ class TelegramBridge:
         )
         if query.message is not None:
             await query.message.reply(
-                body, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                body,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
             )
 
-    async def _send_draft(self, query: CallbackQuery, rest: str) -> None:
+    async def _send_draft(self, query: CallbackQuery, account: Account, rest: str) -> None:
         chat_raw, _, index_raw = rest.partition(":")
         try:
             chat_id, index = int(chat_raw), int(index_raw)
-            text = self._drafts[chat_id][index]
+            text = self._drafts[(account.name, chat_id)][index]
         except (ValueError, KeyError, IndexError):
             await query.answer("Черновик потерялся, сгенерируй заново", show_alert=True)
             return
         try:
-            await self.router.send_to_max(chat_id, text)
+            await account.router.send_to_max(chat_id, text)
         except Exception as exc:  # noqa: BLE001
             await query.answer(f"Не ушло: {exc}", show_alert=True)
             return
@@ -580,18 +717,21 @@ class TelegramBridge:
 
     # --------------------------------------------------------------- запуск
     async def run(self) -> None:
-        stored = self.storage.get("forum_chat_id")
-        if stored and not self.config.forum_chat_id:
-            self.config.forum_chat_id = int(stored)
+        for account in self.accounts:
+            if not account.forum_chat_id:
+                stored = account.storage.get("forum_chat_id")
+                if stored:
+                    self.accounts.rebind(account, int(stored))
         me = await self.bot.get_me()
-        log.info("Telegram-бот @%s запущен", me.username)
+        log.info("Telegram-бот @%s запущен, аккаунтов MAX: %d", me.username, len(self.accounts))
         await self.dp.start_polling(self.bot, handle_signals=False)
 
-    async def notify_owner(self, text: str, **kwargs: Any) -> None:
+    async def notify(self, account: Account, text: str, **kwargs: Any) -> None:
+        """Личное сообщение владельцу аккаунта (сводки, радар незакрытых)."""
         try:
-            await self.bot.send_message(self.config.owner_id, text, **kwargs)
+            await self.bot.send_message(account.owner_id, text, **kwargs)
         except Exception:  # noqa: BLE001
-            log.exception("не смог написать владельцу")
+            log.exception("не смог написать владельцу аккаунта «%s»", account.name)
 
     async def close(self) -> None:
         await self.bot.session.close()

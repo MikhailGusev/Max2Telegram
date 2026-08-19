@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from .accounts import Account, AccountRegistry, build_accounts
 from .channels import build_channels
 from .channels.webhook import WhatsAppWebhookServer
 from .config import Config, load_config
@@ -13,12 +14,9 @@ from .core.digest import digest_scheduler
 from .core.escalation import Escalator
 from .core.followup import followup_watcher
 from .core.licensing import load_license
-from .core.router import Router
 from .core.transcribe import Transcriber
-from .db import Storage
 from .logging_setup import setup_logging
 from .telegram import TelegramBridge
-from .transports import build_transport
 
 log = logging.getLogger("maxbridge.app")
 
@@ -26,7 +24,6 @@ log = logging.getLogger("maxbridge.app")
 class Application:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.storage = Storage(config.db_path)
         self.license = load_license(config.license_key)
         self.ai = AiAssistant(
             config.anthropic_key if config.ai_enabled else "",
@@ -36,20 +33,24 @@ class Application:
         self.transcriber = Transcriber(
             config.asr_url, config.asr_key, config.asr_model, config.asr_lang
         )
-        self.transport = build_transport(config)
-        self.router = Router(config, self.storage, self.transport, self.ai)
+        self.accounts: AccountRegistry = build_accounts(config, self.ai, self.license)
         self.telegram = TelegramBridge(
-            config, self.storage, self.router, self.ai, self.license, self.transcriber
+            config, self.accounts, self.ai, self.license, self.transcriber
         )
-        self.router.attach_telegram(self.telegram)
+
+        # каналы эскалации общие: незачем держать по подключению на аккаунт
         self.channels = build_channels(config)
-        self.escalator = Escalator(
-            self.storage,
-            self.channels,
-            self.license,
-            after_minutes=config.escalate_after_minutes,
-            enabled_channels=config.escalate_channels,
-        )
+        for account in self.accounts:
+            account.attach_escalator(
+                Escalator(
+                    account.storage,
+                    self.channels,
+                    self.license,
+                    after_minutes=account.config.escalate_after_minutes,
+                    enabled_channels=account.config.escalate_channels,
+                )
+            )
+
         self.wa_webhook = self._build_webhook()
 
     def _build_webhook(self) -> WhatsAppWebhookServer | None:
@@ -74,36 +75,32 @@ class Application:
         )
 
     async def _on_whatsapp_reply(self, text: str, sender: str) -> None:
-        result = await self.router.handle_external_reply(text, sender)
-        log.info("WhatsApp -> MAX: %s", result)
+        # ответ из WhatsApp относится к аккаунту, по которому была эскалация;
+        # при нескольких аккаунтах берём тот, где эскалация была последней
+        account = max(
+            self.accounts,
+            key=lambda acc: int(acc.storage.get("last_escalated_at", "0") or 0),
+        )
+        result = await account.router.handle_external_reply(text, sender)
+        log.info("WhatsApp -> MAX (аккаунт «%s»): %s", account.name, result)
 
     async def run(self) -> None:
         log.info("лицензия: %s", self.license.describe())
-        if not self.transport.sees_everything:
-            log.warning(
-                "режим botapi: бот увидит только адресованные ему сообщения. "
-                "Для полного охвата аккаунта нужен MAX_MODE=userbot"
-            )
-
-        async def notify(text: str) -> None:
-            await self.telegram.notify_owner(text, parse_mode="HTML")
+        for account in self.accounts:
+            if not account.transport.sees_everything:
+                log.warning(
+                    "аккаунт «%s» в режиме botapi: бот увидит только адресованные ему "
+                    "сообщения. Для полного охвата нужен MAX_MODE=userbot",
+                    account.name,
+                )
 
         if self.wa_webhook is not None:
             await self.wa_webhook.start()
 
-        tasks = [
-            asyncio.create_task(self.telegram.run(), name="telegram"),
-            asyncio.create_task(self.router.run(), name="max"),
-            asyncio.create_task(self.escalator.run(), name="escalation"),
-            asyncio.create_task(
-                digest_scheduler(self.storage, self.ai, self.config.digest_hour, notify),
-                name="digest",
-            ),
-            asyncio.create_task(
-                followup_watcher(self.storage, self.config.followup_minutes, notify),
-                name="followup",
-            ),
-        ]
+        tasks = [asyncio.create_task(self.telegram.run(), name="telegram")]
+        for account in self.accounts:
+            tasks.extend(self._account_tasks(account))
+
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in pending:
             task.cancel()
@@ -111,15 +108,40 @@ class Application:
             if task.exception() is not None:
                 raise task.exception()  # type: ignore[misc]
 
+    def _account_tasks(self, account: Account) -> list[asyncio.Task[None]]:
+        async def notify(text: str) -> None:
+            await self.telegram.notify(account, text, parse_mode="HTML")
+
+        tasks = [
+            asyncio.create_task(account.router.run(), name=f"max:{account.name}"),
+            asyncio.create_task(
+                digest_scheduler(
+                    account.storage, self.ai, account.config.digest_hour, notify
+                ),
+                name=f"digest:{account.name}",
+            ),
+            asyncio.create_task(
+                followup_watcher(account.storage, account.config.followup_minutes, notify),
+                name=f"followup:{account.name}",
+            ),
+        ]
+        if account.escalator is not None:
+            tasks.append(
+                asyncio.create_task(
+                    account.escalator.run(), name=f"escalation:{account.name}"
+                )
+            )
+        return tasks
+
     async def close(self) -> None:
         if self.wa_webhook is not None:
             await self.wa_webhook.stop()
-        await self.transport.stop()
+        for account in self.accounts:
+            await account.close()
         await self.telegram.close()
         await self.transcriber.close()
         for channel in self.channels:
             await channel.close()
-        self.storage.close()
 
 
 async def main_async() -> int:

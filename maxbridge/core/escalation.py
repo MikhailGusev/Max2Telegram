@@ -107,8 +107,11 @@ class Escalator:
         self.storage.mark_escalated(row["id"] for row in batch)
         if delivered:
             # запоминаем чат последней эскалации: ответ из WhatsApp без явного
-            # номера чата уйдёт именно сюда (см. Router.handle_external_reply)
+            # номера чата уйдёт именно сюда (см. Router.handle_external_reply).
+            # Отметка времени нужна, чтобы при нескольких аккаунтах выбрать тот,
+            # по которому эскалация была последней.
             self.storage.set("last_escalated_chat", str(batch[-1]["max_chat_id"]))
+            self.storage.set("last_escalated_at", str(int(time.time())))
         else:
             log.error("эскалация не доставлена ни одним каналом")
 
