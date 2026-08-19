@@ -68,12 +68,12 @@ class License:
         if self.plan == "community":
             return "Community — мост, правила, поиск, дайджест, AI на своём ключе"
         until = (
-            time.strftime("%d.%m.%Y", time.localtime(self.expires_at))
+            "до " + time.strftime("%d.%m.%Y", time.localtime(self.expires_at))
             if self.expires_at
             else "бессрочно"
         )
         extra = ", ".join(sorted(self.features - COMMUNITY_FEATURES)) or "—"
-        return f"{self.plan.upper()} для «{self.customer}» до {until}; платные функции: {extra}"
+        return f"{self.plan.upper()} для «{self.customer}», {until}; платные функции: {extra}"
 
 
 def _b64url_decode(chunk: str) -> bytes:

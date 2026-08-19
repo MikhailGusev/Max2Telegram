@@ -36,3 +36,10 @@ build/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# ---- вендорское: НЕ публиковать ----
+# инструмент выпуска лицензий и приватный ключ подписи.
+# При разделении проекта переедет в приватный maxbridge-pro.
+/tools/
+vendor_private.key
+issued_licenses.jsonl
