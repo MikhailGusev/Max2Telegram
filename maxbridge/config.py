@@ -48,6 +48,10 @@ class Config:
     ai_model: str
     ai_enabled: bool
     ai_lang: str
+    #: прокси только для Anthropic. MAX и Telegram ходят напрямую, чтобы
+    #: сессия MAX не выглядела приходящей из другой страны
+    ai_proxy: str
+    ai_base_url: str
 
     stealth_mode: bool
     digest_hour: int
@@ -131,6 +135,8 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         ai_model=os.getenv("AI_MODEL", "claude-opus-5").strip(),
         ai_enabled=_bool("AI_ENABLED", True),
         ai_lang=os.getenv("AI_LANG", "ru").strip(),
+        ai_proxy=os.getenv("AI_PROXY", "").strip(),
+        ai_base_url=os.getenv("AI_BASE_URL", "").strip(),
         stealth_mode=_bool("STEALTH_MODE", True),
         digest_hour=_int("DIGEST_HOUR", 9),
         followup_minutes=_int("FOLLOWUP_MINUTES", 180),

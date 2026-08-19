@@ -71,3 +71,18 @@ def test_trim_keeps_message_readable() -> None:
 
 def test_trim_leaves_short_text_alone() -> None:
     assert NotifyChannel.trim("коротко", 40) == "коротко"
+
+
+def test_proxy_credentials_are_hidden_in_logs() -> None:
+    """Прокси задают как http://user:pass@host — пароль не должен светиться."""
+    from maxbridge.core.ai import _hide_credentials
+
+    assert _hide_credentials("http://vasya:secret@1.2.3.4:3128") == "http://***@1.2.3.4:3128"
+    assert "secret" not in _hide_credentials("http://vasya:secret@1.2.3.4:3128")
+    assert _hide_credentials("http://1.2.3.4:3128") == "http://1.2.3.4:3128"
+
+
+def test_ai_stays_off_without_key_even_with_proxy() -> None:
+    from maxbridge.core.ai import AiAssistant
+
+    assert not AiAssistant("", proxy="http://1.2.3.4:3128").enabled

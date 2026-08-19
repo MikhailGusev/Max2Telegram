@@ -10,6 +10,7 @@ import asyncio
 from ..channels import build_channels
 from ..cli.login import _configs
 from ..config import load_config
+from ..core.ai import _hide_credentials
 from ..core.licensing import load_license
 from ..db import Storage
 from ..logging_setup import setup_logging
@@ -52,6 +53,12 @@ async def check_flow() -> int:
     print(f"\nAI: {'✓ включён' if config.ai_active else '✗ выключен (нет ANTHROPIC_API_KEY)'}")
     if config.ai_active:
         print(f"  модель: {config.ai_model}")
+        if config.ai_proxy:
+            print(f"  прокси: {_hide_credentials(config.ai_proxy)} (только для Anthropic)")
+        else:
+            print("  прокси: нет — api.anthropic.com должен быть доступен напрямую")
+        if config.ai_base_url:
+            print(f"  адрес: {config.ai_base_url}")
 
     if config.asr_url:
         print(f"Голосовые в текст: ✓ {config.asr_url} ({config.asr_model})")

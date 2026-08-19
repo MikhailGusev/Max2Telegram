@@ -78,6 +78,14 @@ DIGEST_SYSTEM = (
 )
 
 
+def _hide_credentials(url: str) -> str:
+    """Прокси часто задают как http://user:pass@host — пароль в лог не пускаем."""
+    if "@" not in url:
+        return url
+    scheme, _, rest = url.partition("://")
+    return f"{scheme}://***@{rest.rpartition('@')[2]}" if rest else url
+
+
 @dataclass(slots=True)
 class AiVerdict:
     priority: str
@@ -93,17 +101,44 @@ class Draft:
 
 
 class AiAssistant:
-    def __init__(self, api_key: str, model: str = "claude-opus-5", lang: str = "ru") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-opus-5",
+        lang: str = "ru",
+        *,
+        proxy: str = "",
+        base_url: str = "",
+    ) -> None:
+        """proxy — выход наружу только для Anthropic.
+
+        Нужен там, где сервер стоит в стране, откуда Anthropic не обслуживает
+        (запросы отбиваются с 403). Остальной трафик моста — MAX и Telegram —
+        через прокси НЕ идёт: сессия MAX должна приходить с локального адреса.
+        """
         self.model = model
         self.lang = lang
+        self.proxy = proxy
         self._client: Any = None
-        if api_key:
-            try:
-                from anthropic import AsyncAnthropic
+        if not api_key:
+            return
 
-                self._client = AsyncAnthropic(api_key=api_key)
-            except ImportError:
-                log.warning("пакет anthropic не установлен — AI-функции выключены")
+        try:
+            from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
+        except ImportError:
+            log.warning("пакет anthropic не установлен — AI-функции выключены")
+            return
+
+        options: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            options["base_url"] = base_url
+        if proxy:
+            # DefaultAsyncHttpxClient, а не голый httpx: сохраняются таймауты
+            # и лимиты соединений, настроенные в SDK
+            options["http_client"] = DefaultAsyncHttpxClient(proxy=proxy)
+            log.info("Anthropic ходит через прокси %s", _hide_credentials(proxy))
+
+        self._client = AsyncAnthropic(**options)
 
     @property
     def enabled(self) -> bool:

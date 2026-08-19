@@ -29,6 +29,8 @@ class Application:
             config.anthropic_key if config.ai_enabled else "",
             model=config.ai_model,
             lang=config.ai_lang,
+            proxy=config.ai_proxy,
+            base_url=config.ai_base_url,
         )
         self.transcriber = Transcriber(
             config.asr_url, config.asr_key, config.asr_model, config.asr_lang
