@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from .accounts import Account, AccountRegistry, build_accounts
-from .channels import build_channels
-from .channels.webhook import WhatsAppWebhookServer
+from .channels import build_channels, build_inbound
 from .config import Config, load_config
 from .core.ai import AiAssistant
 from .core.digest import digest_scheduler
@@ -53,26 +53,21 @@ class Application:
 
         self.wa_webhook = self._build_webhook()
 
-    def _build_webhook(self) -> WhatsAppWebhookServer | None:
-        """Приём ответов из WhatsApp. Только при лицензии Pro и явном включении."""
+    def _build_webhook(self) -> Any | None:
+        """Приём ответов из внешнего канала. Только при лицензии Pro."""
         if not self.config.wa_webhook_enabled:
             return None
         if not self.license.allows("whatsapp"):
             log.warning("ответы из WhatsApp требуют лицензию Pro — вебхук не поднимаю")
             return None
 
-        allowed = {
-            "".join(ch for ch in number if ch.isdigit())
-            for number in (self.config.whatsapp_to, self.config.sms_to)
-            if number
-        }
-        return WhatsAppWebhookServer(
-            self._on_whatsapp_reply,
-            host=self.config.wa_webhook_host,
-            port=self.config.wa_webhook_port,
-            verify_token=self.config.wa_verify_token,
-            allowed_numbers=allowed,
-        )
+        server = build_inbound(self.config, self._on_whatsapp_reply)
+        if server is None:
+            log.warning(
+                "приём ответов включён, но пакет с каналами не установлен: "
+                "pip install maxbridge-pro"
+            )
+        return server
 
     async def _on_whatsapp_reply(self, text: str, sender: str) -> None:
         # ответ из WhatsApp относится к аккаунту, по которому была эскалация;

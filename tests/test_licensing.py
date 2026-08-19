@@ -1,4 +1,9 @@
-"""Лицензии и каналы: без ключа — Community, платные каналы закрыты."""
+"""Лицензии и подключение каналов.
+
+Сами каналы (SMS, WhatsApp) живут в отдельном пакете, поэтому здесь
+проверяется только то, что относится к ядру: разбор ключа, набор бесплатных
+функций и то, что без пакета с каналами мост спокойно работает без них.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from maxbridge.channels.sms import SmsChannel  # noqa: E402
-from maxbridge.channels.whatsapp import WhatsAppChannel  # noqa: E402
+from maxbridge.channels import build_channels  # noqa: E402
+from maxbridge.channels.base import NotifyChannel  # noqa: E402
+from maxbridge.config import load_config  # noqa: E402
 from maxbridge.core.licensing import COMMUNITY_FEATURES, load_license  # noqa: E402
 
 
@@ -33,32 +39,35 @@ def test_garbage_key_degrades_quietly() -> None:
 def test_community_feature_set_is_stable() -> None:
     assert {"bridge", "rules", "search", "digest"} <= COMMUNITY_FEATURES
     assert "sms" not in COMMUNITY_FEATURES
+    assert "multiaccount" not in COMMUNITY_FEATURES
 
 
-def test_sms_channel_requires_credentials() -> None:
-    assert not SmsChannel(provider="smsru", recipient="+79990000000").configured
-    assert SmsChannel(provider="smsru", api_key="k", recipient="+79990000000").configured
-    assert not SmsChannel(provider="smsc", login="l", recipient="+7999").configured
-    assert SmsChannel(provider="smsc", login="l", password="p", recipient="+7999").configured
+def test_expired_license_falls_back_to_community() -> None:
+    from maxbridge.core.licensing import License
+
+    expired = License(
+        plan="pro",
+        customer="Тест",
+        expires_at=1,  # 1970 год
+        features=frozenset(COMMUNITY_FEATURES | {"sms"}),
+    )
+    assert expired.expired
+    assert expired.allows("bridge") and not expired.allows("sms")
 
 
-def test_whatsapp_channel_requires_credentials() -> None:
-    assert not WhatsAppChannel(provider="cloud", token="t", recipient="").configured
-    assert WhatsAppChannel(
-        provider="cloud", token="t", phone_number_id="1", recipient="79990000000"
-    ).configured
-    assert WhatsAppChannel(
-        provider="waha", waha_url="http://localhost:3000", recipient="79990000000"
-    ).configured
-
-
-def test_unknown_provider_is_not_configured() -> None:
-    assert not SmsChannel(provider="почтовый голубь", api_key="k", recipient="+7999").configured
-    assert not WhatsAppChannel(provider="", token="t", recipient="7999").configured
+def test_bridge_works_without_channel_package(tmp_path: Path) -> None:
+    """Пакета с каналами нет — список пуст, и это не ошибка."""
+    config = load_config(tmp_path / "нет.env")
+    config.db_path = tmp_path / "t.db"
+    assert build_channels(config) == []
 
 
 def test_trim_keeps_message_readable() -> None:
     long_text = "слово " * 100
-    trimmed = SmsChannel.trim(long_text, 40)
+    trimmed = NotifyChannel.trim(long_text, 40)
     assert len(trimmed) <= 40
     assert trimmed.endswith("…")
+
+
+def test_trim_leaves_short_text_alone() -> None:
+    assert NotifyChannel.trim("коротко", 40) == "коротко"
