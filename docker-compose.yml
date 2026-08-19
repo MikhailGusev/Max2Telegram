@@ -1,0 +1,14 @@
+services:
+  bridge:
+    build: .
+    container_name: maxbridge
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # база, сессия MAX и логи переживают пересборку образа
+      - ./data:/app/data
+    # вебхук WhatsApp (Pro). Наружу публикуй только через reverse-proxy с HTTPS
+    # ports:
+    #   - "127.0.0.1:8081:8081"
+    stdin_open: true
+    tty: true

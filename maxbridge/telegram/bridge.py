@@ -18,6 +18,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -30,12 +31,16 @@ from ..core.ai import AiAssistant
 from ..core.licensing import License
 from ..core.router import Router
 from ..core.rules import Verdict
+from ..core.transcribe import Transcriber
 from ..db import Storage
 from ..models import MaxMessage
 
 log = logging.getLogger("maxbridge.telegram")
 
 PRIORITY_MARK = {"urgent": "🔥", "normal": "", "low": "· "}
+
+#: боты Telegram не могут ни скачивать, ни отправлять файлы больше 50 МБ
+MAX_TELEGRAM_UPLOAD = 50 * 1024 * 1024
 
 
 class TelegramBridge:
@@ -46,12 +51,14 @@ class TelegramBridge:
         router: Router,
         ai: AiAssistant,
         license_: License,
+        transcriber: Transcriber | None = None,
     ) -> None:
         self.config = config
         self.storage = storage
         self.router = router
         self.ai = ai
         self.license = license_
+        self.transcriber = transcriber or Transcriber()
         self.bot = Bot(token=config.telegram_token)
         self.dp = Dispatcher()
         self._drafts: dict[int, list[str]] = {}
@@ -67,6 +74,12 @@ class TelegramBridge:
         topic_id = await self._ensure_topic(message)
         text = self._render(message, verdict)
         keyboard = self._keyboard(message, verdict)
+
+        if message.attachments and self.router.transport.supports_media:
+            sent_id = await self._deliver_media(message, topic_id, text, keyboard)
+            if sent_id is not None:
+                return sent_id
+            # не получилось перетащить файл — ниже уйдёт текст со ссылкой
 
         try:
             sent = await self.bot.send_message(
@@ -91,6 +104,72 @@ class TelegramBridge:
                 )
             else:
                 raise
+        return sent.message_id
+
+    async def _deliver_media(
+        self,
+        message: MaxMessage,
+        topic_id: int,
+        caption: str,
+        keyboard: InlineKeyboardMarkup | None,
+    ) -> int | None:
+        """Перекладывает вложение из MAX в Telegram настоящим файлом.
+
+        Возвращает None, если не получилось, — вызывающий отправит текст
+        со ссылкой, чтобы сообщение не потерялось совсем.
+        """
+        attachment = message.attachments[0]
+        try:
+            data, filename = await self.router.transport.fetch_attachment(message, 0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("вложение «%s» не скачалось: %s", attachment.kind, exc)
+            return None
+
+        if len(data) > MAX_TELEGRAM_UPLOAD:
+            log.info("вложение %.1f МБ больше лимита Telegram — отправляю ссылкой",
+                     len(data) / 1024 / 1024)
+            return None
+
+        # голосовое приходит текстом: его можно прочитать глазами, найти
+        # поиском и скормить правилам приоритета
+        if attachment.kind in {"audio", "voice"} and self.transcriber.enabled:
+            recognized = await self.transcriber.transcribe(data, filename)
+            if recognized:
+                caption = f"{caption}\n\n🎧 <i>{html.escape(recognized)}</i>"
+                self.storage.save_transcript(
+                    message.chat_id, str(message.message_id), recognized
+                )
+
+        file = BufferedInputFile(data, filename=filename)
+        # у медиа лимит подписи 1024 символа, у текста — 4096
+        short = caption if len(caption) <= 1024 else caption[:1021] + "..."
+        common: dict[str, Any] = {
+            "chat_id": self.config.forum_chat_id,
+            "message_thread_id": topic_id,
+            "caption": short,
+            "parse_mode": "HTML",
+            "reply_markup": keyboard,
+        }
+
+        try:
+            if attachment.kind == "photo":
+                sent = await self.bot.send_photo(photo=file, **common)
+            elif attachment.kind == "video":
+                sent = await self.bot.send_video(video=file, **common)
+            elif attachment.kind in {"audio", "voice"}:
+                sent = await self.bot.send_voice(voice=file, **common)
+            else:
+                sent = await self.bot.send_document(document=file, **common)
+        except TelegramBadRequest as exc:
+            log.warning("Telegram не принял вложение: %s", exc)
+            return None
+
+        if len(message.attachments) > 1:
+            await self.bot.send_message(
+                chat_id=self.config.forum_chat_id,
+                message_thread_id=topic_id,
+                text=f"…и ещё вложений: {len(message.attachments) - 1}",
+            )
         return sent.message_id
 
     async def _ensure_topic(self, message: MaxMessage) -> int:
@@ -169,6 +248,11 @@ class TelegramBridge:
         dp.message.register(self._cmd_license, Command("license"))
         dp.message.register(self._cmd_help, Command("help"))
         dp.message.register(self._on_topic_reply, F.message_thread_id.is_not(None), F.text)
+        dp.message.register(
+            self._on_topic_media,
+            F.message_thread_id.is_not(None),
+            F.photo | F.document | F.video | F.voice | F.audio,
+        )
         dp.callback_query.register(self._on_callback)
 
     async def _guard(self, event: Message | CallbackQuery) -> bool:
@@ -367,6 +451,61 @@ class TelegramBridge:
             return
 
         # галочка вместо ответного сообщения: не засоряем тему
+        try:
+            await message.react([ReactionTypeEmoji(emoji="👍")])
+        except TelegramBadRequest:
+            pass
+
+    async def _on_topic_media(self, message: Message) -> None:
+        """Фото или файл, отправленный в тему, уходит в тот же чат MAX."""
+        if not await self._guard(message):
+            return
+        if message.chat.id != self.config.forum_chat_id:
+            return
+
+        chat = self.storage.chat_by_topic(message.message_thread_id or 0)
+        if chat is None:
+            await message.reply("Не знаю, в какой чат MAX это отправить.")
+            return
+        if not self.router.transport.supports_media:
+            await message.reply("Текущий транспорт MAX не умеет отправлять файлы.")
+            return
+
+        if message.photo:
+            file_id, filename, kind = message.photo[-1].file_id, "image.jpg", "photo"
+        elif message.video:
+            file_id = message.video.file_id
+            filename, kind = message.video.file_name or "video.mp4", "video"
+        elif message.voice:
+            file_id, filename, kind = message.voice.file_id, "voice.ogg", "file"
+        elif message.audio:
+            file_id = message.audio.file_id
+            filename, kind = message.audio.file_name or "audio.mp3", "file"
+        else:
+            file_id = message.document.file_id
+            filename, kind = message.document.file_name or "file.bin", "file"
+
+        try:
+            info = await self.bot.get_file(file_id)
+            buffer = await self.bot.download_file(info.file_path)
+            data = buffer.read()
+        except TelegramBadRequest as exc:
+            await message.reply(f"Не смог забрать файл из Telegram: {exc}")
+            return
+
+        try:
+            await self.router.send_media_to_max(
+                int(chat["max_chat_id"]),
+                data,
+                filename=filename,
+                kind=kind,
+                caption=(message.caption or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("файл не ушёл в MAX")
+            await message.reply(f"Не ушло: {exc}")
+            return
+
         try:
             await message.react([ReactionTypeEmoji(emoji="👍")])
         except TelegramBadRequest:

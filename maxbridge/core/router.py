@@ -153,6 +153,33 @@ class Router:
         self.storage.mark_chat_answered(chat_id)
         return message_id
 
+    async def send_media_to_max(
+        self,
+        chat_id: int,
+        data: bytes,
+        *,
+        filename: str,
+        kind: str = "file",
+        caption: str = "",
+        reply_to: str = "",
+    ) -> str:
+        """Отправляет файл в MAX и фиксирует его в истории."""
+        message_id = await self.transport.send_media(
+            chat_id, data, filename=filename, kind=kind, caption=caption, reply_to=reply_to
+        )
+        self.storage.save_message(
+            MaxMessage(
+                chat_id=chat_id,
+                message_id=message_id or f"local-file-{filename}",
+                text=caption or f"[{kind}] {filename}",
+                outgoing=True,
+                chat_title=self.transport.chat_title(chat_id),
+            )
+        )
+        self.storage.mark_chat_answered(chat_id)
+        log.info("файл %s (%.0f КБ) отправлен в чат %s", filename, len(data) / 1024, chat_id)
+        return message_id
+
     async def handle_external_reply(self, text: str, sender: str = "") -> str:
         """Ответ, пришедший не из Telegram, а из внешнего канала (WhatsApp).
 

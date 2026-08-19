@@ -62,6 +62,12 @@ CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
     INSERT INTO messages_fts (messages_fts, rowid, text, sender_name)
     VALUES ('delete', old.id, old.text, old.sender_name);
 END;
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE OF text ON messages BEGIN
+    INSERT INTO messages_fts (messages_fts, rowid, text, sender_name)
+    VALUES ('delete', old.id, old.text, old.sender_name);
+    INSERT INTO messages_fts (rowid, text, sender_name)
+    VALUES (new.id, new.text, new.sender_name);
+END;
 
 CREATE TABLE IF NOT EXISTS rules (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +189,23 @@ class Storage:
             self._db.commit()
             return cur.lastrowid if cur.rowcount else None
 
+    def save_transcript(self, chat_id: int, max_msg_id: str, text: str) -> None:
+        """Кладёт расшифровку голосового в текст сообщения.
+
+        Так голосовое становится находимым через /find и попадает в сводку —
+        ради этого расшифровка и делается.
+        """
+        if not text.strip():
+            return
+        with self._lock:
+            self._db.execute(
+                "UPDATE messages SET text = CASE WHEN text = '' THEN ?"
+                " ELSE text || char(10) || ? END"
+                " WHERE max_chat_id = ? AND max_msg_id = ?",
+                (text, text, chat_id, str(max_msg_id)),
+            )
+            self._db.commit()
+
     def link_tg_message(self, row_id: int, tg_msg_id: int) -> None:
         with self._lock:
             self._db.execute("UPDATE messages SET tg_msg_id = ? WHERE id = ?", (tg_msg_id, row_id))
@@ -251,7 +274,26 @@ class Storage:
             )
             self._db.commit()
 
+    @staticmethod
+    def _fts_query(raw: str) -> str:
+        """Превращает пользовательский ввод в безопасное выражение FTS5.
+
+        FTS5 разбирает строку как язык запросов, поэтому точки, дефисы, скобки
+        и кавычки в обычном слове («акт.docx», «счёт-фактура») роняют поиск с
+        syntax error. Ищем фразой: кавычки экранируем удвоением, звёздочку в
+        конце сохраняем как поиск по префиксу.
+        """
+        cleaned = raw.strip()
+        prefix = cleaned.endswith("*")
+        if prefix:
+            cleaned = cleaned[:-1].strip()
+        cleaned = cleaned.replace('"', '""')
+        if not cleaned:
+            return '""'
+        return f'"{cleaned}"*' if prefix else f'"{cleaned}"'
+
     def search(self, query: str, limit: int = 20) -> list[sqlite3.Row]:
+        query = self._fts_query(query)
         with self._lock:
             return list(
                 self._db.execute(

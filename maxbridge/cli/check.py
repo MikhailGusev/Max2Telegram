@@ -42,6 +42,11 @@ async def check_flow() -> int:
     if config.ai_active:
         print(f"  модель: {config.ai_model}")
 
+    if config.asr_url:
+        print(f"Голосовые в текст: ✓ {config.asr_url} ({config.asr_model})")
+    else:
+        print("Голосовые в текст: ✗ выключено (нет ASR_URL)")
+
     print(f"Стелс-режим: {'✓' if config.stealth_mode else '✗'}")
     print(f"Ежедневная сводка: {config.digest_hour if config.digest_hour >= 0 else 'выключена'}")
     print(f"Радар незакрытых: {config.followup_minutes or 'выключен'} мин")

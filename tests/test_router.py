@@ -23,11 +23,13 @@ class FakeTransport(MaxTransport):
 
     name = "fake"
     sees_everything = True
+    supports_media = True
 
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[tuple[int, str, str]] = []
         self.read: list[tuple[int, str]] = []
+        self.media: list[tuple[int, int, str, str]] = []
 
     async def start(self) -> None: ...
 
@@ -36,6 +38,19 @@ class FakeTransport(MaxTransport):
     async def send(self, chat_id: int, text: str, *, reply_to: str = "") -> str:
         self.sent.append((chat_id, text, reply_to))
         return f"sent-{len(self.sent)}"
+
+    async def send_media(
+        self,
+        chat_id: int,
+        data: bytes,
+        *,
+        filename: str,
+        kind: str = "file",
+        caption: str = "",
+        reply_to: str = "",
+    ) -> str:
+        self.media.append((chat_id, len(data), filename, kind))
+        return f"media-{len(self.media)}"
 
     async def mark_read(self, chat_id: int, message_id: str) -> None:
         self.read.append((chat_id, message_id))
@@ -134,3 +149,26 @@ async def test_sending_to_max_marks_chat_answered(router: Router) -> None:
     assert router.storage.stats()["pending"] == 1
     await router.send_to_max(7, "Ответ")
     assert router.storage.stats()["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_media_is_forwarded_and_logged(router: Router) -> None:
+    await router.handle_max_message(incoming("Пришли смету?"))
+    assert router.storage.stats()["pending"] == 1
+
+    await router.send_media_to_max(
+        7, b"x" * 2048, filename="смета.pdf", kind="file", caption="держи"
+    )
+
+    assert router.transport.media == [(7, 2048, "смета.pdf", "file")]
+    assert router.storage.stats()["pending"] == 0      # файл тоже закрывает вопрос
+    assert router.storage.stats()["sent"] == 1
+    assert router.storage.search("держи")              # подпись попала в поиск
+
+
+@pytest.mark.asyncio
+async def test_media_without_caption_still_searchable(router: Router) -> None:
+    await router.send_media_to_max(7, b"data", filename="акт.docx", kind="file")
+    found = router.storage.search("акт.docx")
+    assert len(found) == 1
+    assert found[0]["outgoing"] == 1

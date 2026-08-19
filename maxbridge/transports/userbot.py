@@ -36,6 +36,7 @@ ATTACH_KINDS = {
 class UserbotTransport(MaxTransport):
     name = "userbot"
     sees_everything = True
+    supports_media = True
 
     def __init__(self, session_path: str | Path) -> None:
         super().__init__()
@@ -158,11 +159,67 @@ class UserbotTransport(MaxTransport):
         message = payload.get("message") or {}
         return str(message.get("id") or "")
 
+    async def fetch_attachment(self, message: MaxMessage, index: int = 0) -> tuple[bytes, str]:
+        """Скачивает вложение: фото по прямой ссылке, файлы и видео — через
+        отдельный запрос ссылки (она подписанная и живёт недолго)."""
+        if index >= len(message.attachments):
+            raise ValueError("нет такого вложения")
+        attachment = message.attachments[index]
+        raw = attachment.raw
+
+        url = attachment.url
+        if attachment.kind == "file" and raw.get("fileId") is not None:
+            url = await self.client.file_url(
+                message.chat_id, str(message.message_id), int(raw["fileId"])
+            )
+        elif attachment.kind == "video" and raw.get("videoId") is not None:
+            url = await self.client.video_url(
+                message.chat_id, str(message.message_id), int(raw["videoId"])
+            )
+
+        if not url:
+            raise ValueError(f"не смог определить ссылку на вложение «{attachment.kind}»")
+
+        data = await self.client.download(url)
+        return data, attachment.name or _default_name(attachment.kind)
+
+    async def send_media(
+        self,
+        chat_id: int,
+        data: bytes,
+        *,
+        filename: str,
+        kind: str = "file",
+        caption: str = "",
+        reply_to: str = "",
+    ) -> str:
+        if kind == "photo":
+            attach = await self.client.upload_photo(chat_id, data, filename)
+        elif kind == "video":
+            attach = await self.client.upload_video(chat_id, data, filename)
+        else:
+            attach = await self.client.upload_file(chat_id, data, filename)
+
+        response = await self.client.send_message(
+            chat_id, caption, reply_to=reply_to or None, attaches=[attach]
+        )
+        message = (response.get("payload") or {}).get("message") or {}
+        return str(message.get("id") or "")
+
     async def mark_read(self, chat_id: int, message_id: str) -> None:
         await self.client.mark_read(chat_id, message_id)
 
     async def react(self, chat_id: int, message_id: str, emoji: str) -> None:
         await self.client.react(chat_id, message_id, emoji)
+
+
+def _default_name(kind: str) -> str:
+    return {
+        "photo": "image.jpg",
+        "video": "video.mp4",
+        "audio": "audio.ogg",
+        "sticker": "sticker.webp",
+    }.get(kind, "file.bin")
 
 
 def _parse_attaches(attaches: list[Any]) -> list[Attachment]:

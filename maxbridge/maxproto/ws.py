@@ -67,6 +67,9 @@ class MaxWSClient:
         self._handlers: list[PacketHandler] = []
         self._recv_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        #: ожидание подтверждения загрузки файла/видео (событие opcode 136)
+        self._upload_waiters: dict[str, asyncio.Future[None]] = {}
+        self._http: Any = None  # aiohttp.ClientSession, создаётся лениво
 
         self._device_id: str = ""
         self._token: str = ""
@@ -130,6 +133,9 @@ class MaxWSClient:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+        if self._http is not None and not self._http.closed:
+            await self._http.close()
+            self._http = None
 
     async def invoke(self, opcode: int, payload: dict[str, Any]) -> dict[str, Any]:
         """Отправляет запрос и ждёт ответ с тем же seq."""
@@ -181,6 +187,17 @@ class MaxWSClient:
         if future is not None and not future.done():
             future.set_result(packet)
             return
+
+        # подтверждение того, что залитый файл обработан на стороне MAX
+        if packet.get("opcode") == Op.EVT_UPLOAD_PROGRESS:
+            payload = packet.get("payload") or {}
+            for key in ("fileId", "videoId"):
+                if key in payload:
+                    waiter = self._upload_waiters.pop(str(payload[key]), None)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(None)
+            return
+
         for handler in self._handlers:
             try:
                 await handler(packet)
@@ -315,13 +332,19 @@ class MaxWSClient:
 
     # --------------------------------------------------------------- методы
     async def send_message(
-        self, chat_id: int, text: str, *, reply_to: str | None = None, notify: bool = True
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_to: str | None = None,
+        notify: bool = True,
+        attaches: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         message: dict[str, Any] = {
             "text": text,
             "cid": random.randint(1_750_000_000_000, 2_000_000_000_000),
             "elements": [],
-            "attaches": [],
+            "attaches": attaches or [],
         }
         if reply_to:
             message["link"] = {"type": "REPLY", "messageId": str(reply_to)}
@@ -371,6 +394,126 @@ class MaxWSClient:
             },
         )
         return response.get("payload") or {}
+
+    # ----------------------------------------------------------- вложения
+    async def _http_session(self) -> Any:
+        import aiohttp
+
+        if self._http is None or self._http.closed:
+            self._http = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=180),
+                headers={"User-Agent": USER_AGENT, "Referer": WEB_ORIGIN + "/"},
+            )
+        return self._http
+
+    async def file_url(self, chat_id: int, message_id: str, file_id: int) -> str:
+        """Прямая ссылка на файл из сообщения."""
+        response = await self.invoke(
+            Op.DOWNLOAD_FILE,
+            {"fileId": int(file_id), "chatId": int(chat_id), "messageId": str(message_id)},
+        )
+        return str((response.get("payload") or {}).get("url") or "")
+
+    async def video_url(self, chat_id: int, message_id: str, video_id: int) -> str:
+        """Прямая ссылка на видео. MAX отдаёт несколько качеств — берём первое."""
+        response = await self.invoke(
+            Op.DOWNLOAD_VIDEO,
+            {"videoId": int(video_id), "chatId": int(chat_id), "messageId": str(message_id)},
+        )
+        formats = dict(response.get("payload") or {})
+        for service_key in ("cache", "EXTERNAL", "failoverHost", "liveDvr"):
+            formats.pop(service_key, None)
+        for value in formats.values():
+            if isinstance(value, str) and value.startswith("http"):
+                return value
+        return ""
+
+    async def download(self, url: str, *, limit_bytes: int = 100 * 1024 * 1024) -> bytes:
+        """Скачивает вложение. limit_bytes страхует от гигантских файлов."""
+        session = await self._http_session()
+        async with session.get(url) as response:
+            if response.status >= 400:
+                raise MaxProtocolError(f"скачивание не удалось: HTTP {response.status}")
+            size = int(response.headers.get("Content-Length") or 0)
+            if size and size > limit_bytes:
+                raise MaxProtocolError(f"файл слишком большой: {size} байт")
+            return await response.content.read(limit_bytes + 1)
+
+    async def _open_upload(self, chat_id: int, attach_type: str, opcode: int) -> dict[str, Any]:
+        response = await self.invoke(opcode, {"count": 1})
+        payload = response.get("payload") or {}
+        await self.invoke(Op.UPLOAD_DONE, {"chatId": int(chat_id), "type": attach_type})
+        return payload
+
+    async def _post_file(
+        self, url: str, data: bytes, filename: str, mimetype: str
+    ) -> dict[str, Any]:
+        import aiohttp
+
+        session = await self._http_session()
+        form = aiohttp.FormData()
+        form.add_field("file", data, filename=filename, content_type=mimetype)
+        async with session.post(url, data=form, headers={"Origin": WEB_ORIGIN}) as response:
+            if response.status >= 400:
+                raise MaxProtocolError(f"загрузка не удалась: HTTP {response.status}")
+            try:
+                return await response.json(content_type=None)
+            except Exception:  # noqa: BLE001 - некоторые ответы приходят пустыми
+                return {}
+
+    async def upload_photo(self, chat_id: int, data: bytes, filename: str = "image.jpg") -> dict[str, Any]:
+        payload = await self._open_upload(chat_id, "PHOTO", Op.UPLOAD_PHOTO)
+        url = str(payload.get("url") or "")
+        if not url:
+            raise MaxProtocolError("MAX не выдал адрес для загрузки фото")
+        result = await self._post_file(url, data, filename, "image/jpeg")
+        photos = result.get("photos") or {}
+        if not photos:
+            raise MaxProtocolError("MAX не вернул токен загруженного фото")
+        token = list(photos.values())[0].get("token")
+        return {"_type": "PHOTO", "photoToken": token}
+
+    async def upload_file(
+        self, chat_id: int, data: bytes, filename: str = "file.bin"
+    ) -> dict[str, Any]:
+        payload = await self._open_upload(chat_id, "FILE", Op.UPLOAD_FILE)
+        info = (payload.get("info") or [{}])[0]
+        url, file_id = str(info.get("url") or ""), info.get("fileId")
+        if not url or file_id is None:
+            raise MaxProtocolError("MAX не выдал адрес для загрузки файла")
+
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._upload_waiters[str(file_id)] = waiter
+        try:
+            await self._post_file(url, data, filename, "application/octet-stream")
+            # MAX подтверждает обработку отдельным событием; без него вложение
+            # уйдёт «битым», поэтому ждём, но не вечно
+            await asyncio.wait_for(waiter, timeout=120)
+        except asyncio.TimeoutError as exc:
+            raise MaxProtocolError("MAX не подтвердил загрузку файла") from exc
+        finally:
+            self._upload_waiters.pop(str(file_id), None)
+        return {"_type": "FILE", "fileId": file_id}
+
+    async def upload_video(
+        self, chat_id: int, data: bytes, filename: str = "video.mp4"
+    ) -> dict[str, Any]:
+        payload = await self._open_upload(chat_id, "VIDEO", Op.UPLOAD_VIDEO)
+        info = (payload.get("info") or [{}])[0]
+        url, video_id, token = str(info.get("url") or ""), info.get("videoId"), info.get("token")
+        if not url or video_id is None:
+            raise MaxProtocolError("MAX не выдал адрес для загрузки видео")
+
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._upload_waiters[str(video_id)] = waiter
+        try:
+            await self._post_file(url, data, filename, "video/mp4")
+            await asyncio.wait_for(waiter, timeout=300)
+        except asyncio.TimeoutError as exc:
+            raise MaxProtocolError("MAX не подтвердил загрузку видео") from exc
+        finally:
+            self._upload_waiters.pop(str(video_id), None)
+        return {"_type": "VIDEO", "videoId": video_id, "token": token}
 
     async def react(self, chat_id: int, message_id: str, emoji: str = "👍") -> dict[str, Any]:
         return await self.invoke(

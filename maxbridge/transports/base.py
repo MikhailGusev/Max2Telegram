@@ -45,6 +45,26 @@ class MaxTransport(abc.ABC):
     async def send(self, chat_id: int, text: str, *, reply_to: str = "") -> str:
         """Отправляет текст в чат MAX. Возвращает id отправленного сообщения."""
 
+    #: умеет ли транспорт перекладывать файлы в обе стороны
+    supports_media: bool = False
+
+    async def fetch_attachment(self, message: MaxMessage, index: int = 0) -> tuple[bytes, str]:
+        """Скачивает вложение сообщения. Возвращает (данные, имя файла)."""
+        raise NotImplementedError("этот транспорт не умеет скачивать вложения")
+
+    async def send_media(
+        self,
+        chat_id: int,
+        data: bytes,
+        *,
+        filename: str,
+        kind: str = "file",
+        caption: str = "",
+        reply_to: str = "",
+    ) -> str:
+        """Отправляет файл в чат MAX. kind: photo | video | file."""
+        raise NotImplementedError("этот транспорт не умеет отправлять файлы")
+
     async def mark_read(self, chat_id: int, message_id: str) -> None:
         """Помечает прочитанным. В стелс-режиме роутер это просто не вызывает."""
         return None

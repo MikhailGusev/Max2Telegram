@@ -45,6 +45,58 @@ def test_fulltext_search_finds_message(storage: Storage) -> None:
     assert found[0]["chat_title"] == "Юристы"
 
 
+@pytest.mark.parametrize(
+    "query",
+    ["акт.docx", "счёт-фактура", "как дела?", 'он сказал "да"', "смета (итог)", "*", ""],
+)
+def test_search_survives_special_characters(storage: Storage, query: str) -> None:
+    """FTS5 разбирает ввод как выражение — пользователь не должен об этом знать."""
+    storage.upsert_chat(1, "Чат")
+    storage.save_message(make(1, "a", "акт.docx и счёт-фактура готовы"))
+    storage.search(query)  # главное — не падает
+
+
+def test_search_finds_token_with_dot(storage: Storage) -> None:
+    storage.upsert_chat(1, "Чат")
+    storage.save_message(make(1, "a", "Отправил акт.docx на подпись"))
+    assert len(storage.search("акт.docx")) == 1
+
+
+def test_prefix_search_with_asterisk(storage: Storage) -> None:
+    storage.upsert_chat(1, "Чат")
+    storage.save_message(make(1, "a", "договорённость достигнута"))
+    assert len(storage.search("договор*")) == 1
+    assert storage.search("договор") == []
+
+
+def test_transcript_makes_voice_searchable(storage: Storage) -> None:
+    """Голосовое приходит без текста — после расшифровки его должен найти /find."""
+    storage.upsert_chat(1, "Чат")
+    storage.save_message(make(1, "v1", ""))
+    assert storage.search("смету") == []
+
+    storage.save_transcript(1, "v1", "пришли смету до пятницы")
+
+    found = storage.search("смету")
+    assert len(found) == 1
+    assert "смету" in found[0]["text"]
+
+
+def test_transcript_appends_to_existing_caption(storage: Storage) -> None:
+    storage.upsert_chat(1, "Чат")
+    storage.save_message(make(1, "v1", "подпись"))
+    storage.save_transcript(1, "v1", "расшифровка")
+    row = storage.recent(1)[0]
+    assert "подпись" in row["text"] and "расшифровка" in row["text"]
+
+
+def test_empty_transcript_is_ignored(storage: Storage) -> None:
+    storage.upsert_chat(1, "Чат")
+    storage.save_message(make(1, "v1", "исходный"))
+    storage.save_transcript(1, "v1", "   ")
+    assert storage.recent(1)[0]["text"] == "исходный"
+
+
 def test_topic_binding_round_trip(storage: Storage) -> None:
     storage.upsert_chat(42, "Поставщики")
     storage.bind_topic(42, 777)

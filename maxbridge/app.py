@@ -14,6 +14,7 @@ from .core.escalation import Escalator
 from .core.followup import followup_watcher
 from .core.licensing import load_license
 from .core.router import Router
+from .core.transcribe import Transcriber
 from .db import Storage
 from .logging_setup import setup_logging
 from .telegram import TelegramBridge
@@ -32,9 +33,14 @@ class Application:
             model=config.ai_model,
             lang=config.ai_lang,
         )
+        self.transcriber = Transcriber(
+            config.asr_url, config.asr_key, config.asr_model, config.asr_lang
+        )
         self.transport = build_transport(config)
         self.router = Router(config, self.storage, self.transport, self.ai)
-        self.telegram = TelegramBridge(config, self.storage, self.router, self.ai, self.license)
+        self.telegram = TelegramBridge(
+            config, self.storage, self.router, self.ai, self.license, self.transcriber
+        )
         self.router.attach_telegram(self.telegram)
         self.channels = build_channels(config)
         self.escalator = Escalator(
@@ -110,6 +116,7 @@ class Application:
             await self.wa_webhook.stop()
         await self.transport.stop()
         await self.telegram.close()
+        await self.transcriber.close()
         for channel in self.channels:
             await channel.close()
         self.storage.close()

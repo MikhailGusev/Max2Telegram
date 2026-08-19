@@ -80,6 +80,11 @@ class Config:
     wa_webhook_port: int
     wa_verify_token: str
 
+    asr_url: str
+    asr_key: str
+    asr_model: str
+    asr_lang: str
+
     session_path: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -143,4 +148,8 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         wa_webhook_host=os.getenv("WA_WEBHOOK_HOST", "127.0.0.1").strip(),
         wa_webhook_port=_int("WA_WEBHOOK_PORT", 8081),
         wa_verify_token=os.getenv("WA_VERIFY_TOKEN", "").strip(),
+        asr_url=os.getenv("ASR_URL", "").strip(),
+        asr_key=os.getenv("ASR_KEY", "").strip(),
+        asr_model=os.getenv("ASR_MODEL", "whisper-1").strip(),
+        asr_lang=os.getenv("ASR_LANG", "ru").strip(),
     )
