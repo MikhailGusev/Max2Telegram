@@ -101,7 +101,8 @@ async def _login_by_token(name: str, config: Config) -> int:
     print("\ndeviceId из браузера (ключ с UUID). Если не нашёл — просто Enter,")
     print("попробуем со свежим; не подойдёт — вернёмся за настоящим.")
     device_id = input("deviceId: ").strip()
-    if not device_id:
+    generated_device = not device_id
+    if generated_device:
         device_id = str(uuid.uuid4())
         print(f"Использую новый: {device_id}")
 
@@ -120,8 +121,22 @@ async def _login_by_token(name: str, config: Config) -> int:
     try:
         payload = await client.login()
     except Exception as exc:  # noqa: BLE001
-        print(f"Токен не подошёл: {exc}")
-        print("Сессия сохранена, но войти не удалось — проверь токен и deviceId.")
+        print(f"\nТокен не подошёл: {exc}")
+        if "login.token" in str(exc) and generated_device:
+            print(
+                "\nОшибка login.token при сгенерированном deviceId почти всегда значит\n"
+                "одно: токен выдан конкретному устройству и с чужим не работает.\n"
+                "Нужен тот самый deviceId из браузера — как его найти, написано\n"
+                "в docs/LOGIN.md, раздел «Где искать deviceId»."
+            )
+        elif "login.token" in str(exc):
+            print(
+                "\nMAX отверг связку токен + deviceId. Возможные причины:\n"
+                "  * скопирован не тот ключ из localStorage;\n"
+                "  * deviceId не от этого токена;\n"
+                "  * веб-сессию завершили в приложении MAX, и токен умер.\n"
+                "Проще всего перелогиниться в браузере и взять пару заново."
+            )
         return 1
     finally:
         await client.close()
