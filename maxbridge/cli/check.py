@@ -50,7 +50,12 @@ async def check_flow() -> int:
         if not account_cfg.forum_chat_id:
             print("    ⚠ группа-приёмник не задана — выполни /bind в нужной группе")
 
-    print(f"\nAI: {'✓ включён' if config.ai_active else '✗ выключен (нет ANTHROPIC_API_KEY)'}")
+    if config.telegram_proxy:
+        print(f"\nTelegram: через прокси {_hide_credentials(config.telegram_proxy)}")
+    else:
+        print("\nTelegram: напрямую (api.telegram.org должен быть доступен)")
+
+    print(f"AI: {'✓ включён' if config.ai_active else '✗ выключен (нет ANTHROPIC_API_KEY)'}")
     if config.ai_active:
         print(f"  модель: {config.ai_model}")
         if config.ai_proxy:

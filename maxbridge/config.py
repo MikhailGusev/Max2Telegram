@@ -38,6 +38,9 @@ class Config:
     telegram_token: str
     owner_id: int
     forum_chat_id: int
+    #: прокси для Telegram. Нужен там, где провайдер режет api.telegram.org
+    #: (частый случай на российских хостингах). MAX всё равно идёт напрямую.
+    telegram_proxy: str
 
     max_mode: str  # userbot | botapi
     max_phone: str
@@ -127,6 +130,7 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         owner_id=_int("TELEGRAM_OWNER_ID", 0),
         forum_chat_id=_int("TELEGRAM_FORUM_CHAT_ID", 0),
+        telegram_proxy=os.getenv("TELEGRAM_PROXY", "").strip(),
         max_mode=os.getenv("MAX_MODE", "userbot").strip().lower(),
         max_phone=os.getenv("MAX_PHONE", "").strip(),
         max_bot_token=os.getenv("MAX_BOT_TOKEN", "").strip(),

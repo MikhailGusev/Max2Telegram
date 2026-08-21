@@ -40,6 +40,7 @@ from ..core.ai import AiAssistant
 from ..core.digest import build_digest
 from ..core.licensing import License
 from ..core.rules import Verdict
+from ..core.ai import _hide_credentials as _hide_proxy
 from ..core.transcribe import Transcriber
 from ..models import MaxMessage
 
@@ -76,7 +77,15 @@ class TelegramBridge:
         self.ai = ai
         self.license = license_
         self.transcriber = transcriber or Transcriber()
-        self.bot = Bot(token=config.telegram_token)
+        # прокси нужен там, где провайдер режет api.telegram.org (российские
+        # хостинги). MAX при этом ходит напрямую — его сессия остаётся местной.
+        session = None
+        if config.telegram_proxy:
+            from aiogram.client.session.aiohttp import AiohttpSession
+
+            session = AiohttpSession(proxy=config.telegram_proxy)
+            log.info("Telegram через прокси %s", _hide_proxy(config.telegram_proxy))
+        self.bot = Bot(token=config.telegram_token, session=session)
         self.dp = Dispatcher()
         self._drafts: dict[tuple[str, int], list[str]] = {}
         self._register()
