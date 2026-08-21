@@ -86,3 +86,17 @@ def test_ai_stays_off_without_key_even_with_proxy() -> None:
     from maxbridge.core.ai import AiAssistant
 
     assert not AiAssistant("", proxy="http://1.2.3.4:3128").enabled
+
+
+def test_token_extraction_handles_what_people_actually_paste() -> None:
+    """Из браузера копируют по-разному — вырезать руками не должно требоваться."""
+    from maxbridge.cli.login import _extract_token
+
+    long_token = "A" * 40
+    assert _extract_token('{"token":"%s","viewerId":123}' % long_token) == long_token
+    assert _extract_token(long_token) == long_token
+    assert _extract_token(f'"{long_token}"') == long_token
+    assert _extract_token(f"token={long_token}") == long_token
+    assert _extract_token("коротко") == ""
+    assert _extract_token("{битый json") == ""
+    assert _extract_token('{"viewerId":123}') == "", "JSON без токена — не токен"

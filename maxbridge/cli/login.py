@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 from getpass import getpass
 
 from ..accounts import ACCOUNTS_FILE, account_config, read_specs
@@ -48,6 +49,31 @@ def _print_list(configs: dict[str, Config]) -> None:
     print("\nВойти:  python -m maxbridge login --account <имя>")
 
 
+def _extract_token(raw: str) -> str:
+    """Достаёт токен из того, что вставил человек.
+
+    В localStorage веб-клиента токен лежит внутри JSON вида
+    {"token": "...", "viewerId": 123}, но вставить могли и просто строку.
+    Разбираем оба случая, чтобы не заставлять руками вырезать значение.
+    """
+    raw = raw.strip()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return ""
+        for key in ("token", "accessToken", "authToken", "access_token"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return value.strip()
+        return ""
+    # иногда копируют вместе с кавычками или как token=...
+    raw = raw.strip('"\' ')
+    if "=" in raw and " " not in raw and len(raw.split("=", 1)[1]) > 20:
+        raw = raw.split("=", 1)[1]
+    return raw if len(raw) > 20 else ""
+
+
 async def _login_by_token(name: str, config: Config) -> int:
     """Вход готовым токеном из веб-клиента.
 
@@ -56,17 +82,28 @@ async def _login_by_token(name: str, config: Config) -> int:
     уже выданный токен и дальше живёт как обычно.
     """
     print(f"Вход по токену для «{name}».\n")
-    print("Где взять: залогинься на https://web.max.ru, открой консоль браузера")
-    print("(F12 -> Console) и посмотри localStorage — подробности в docs/LOGIN.md\n")
+    print("Где взять: залогинься на https://web.max.ru, открой DevTools (F12) ->")
+    print("Application -> Local Storage -> web.max.ru. Подробности в docs/LOGIN.md")
+    print("\nМожно вставить как сам токен, так и весь JSON целиком:")
+    print('  {"token":"An_Sx...","viewerId":12345}\n')
 
-    token = getpass("Токен (ввод скрыт): ").strip()
-    if not token:
+    raw = getpass("Токен (ввод скрыт, вставляй правой кнопкой): ").strip()
+    if not raw:
         print("Пусто — прерываю.")
         return 2
-    device_id = input("deviceId из браузера: ").strip()
-    if not device_id:
-        print("deviceId обязателен: токен выдан конкретному устройству.")
+
+    token = _extract_token(raw)
+    if not token:
+        print("Не нашёл токен в том, что вставлено. Ожидаю длинную строку "
+              "или JSON с полем token.")
         return 2
+
+    print("\ndeviceId из браузера (ключ с UUID). Если не нашёл — просто Enter,")
+    print("попробуем со свежим; не подойдёт — вернёмся за настоящим.")
+    device_id = input("deviceId: ").strip()
+    if not device_id:
+        device_id = str(uuid.uuid4())
+        print(f"Использую новый: {device_id}")
 
     config.session_path.parent.mkdir(parents=True, exist_ok=True)
     config.session_path.write_text(
