@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Первая установка MaxBridge на сервер. Запускать от root:
 #
-#   curl -fsSL https://raw.githubusercontent.com/MikhailGusev/maxbridge/main/deploy/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/MikhailGusev/Max2Telegram/main/deploy/install.sh | bash
 #
 # Или вручную: склонировать репозиторий и выполнить bash deploy/install.sh
 set -euo pipefail
 
-REPO="${MAXBRIDGE_REPO:-https://github.com/MikhailGusev/maxbridge.git}"
+REPO="${MAXBRIDGE_REPO:-https://github.com/MikhailGusev/Max2Telegram.git}"
 DIR="${MAXBRIDGE_DIR:-/root/maxbridge}"
 
 echo "==> MaxBridge: установка в $DIR"

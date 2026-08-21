@@ -7,7 +7,7 @@
 
 ```bash
 mkdir -p /root/maxbridge && cd /root/maxbridge
-git clone git@github.com:<owner>/maxbridge.git .
+git clone git@github.com:MikhailGusev/Max2Telegram.git .
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```

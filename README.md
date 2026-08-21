@@ -98,7 +98,7 @@ python -m maxbridge login --account work
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/<owner>/maxbridge.git && cd maxbridge
+git clone https://github.com/MikhailGusev/Max2Telegram.git && cd Max2Telegram
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env      # заполни токены
 ```
