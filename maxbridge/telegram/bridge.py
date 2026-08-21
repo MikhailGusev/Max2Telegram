@@ -19,7 +19,11 @@ import logging
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramUnauthorizedError,
+)
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
@@ -722,7 +726,21 @@ class TelegramBridge:
                 stored = account.storage.get("forum_chat_id")
                 if stored:
                     self.accounts.rebind(account, int(stored))
-        me = await self.bot.get_me()
+        try:
+            me = await self.bot.get_me()
+        except TelegramNetworkError as exc:
+            log.error(
+                "Telegram недоступен: %s\n"
+                "api.telegram.org не открывается с этой машины. Обычно это "
+                "блокировка провайдера или фаервол — проверь командой:\n"
+                "    curl -sS -o /dev/null -m 10 -w \"%%{http_code}\\n\" https://api.telegram.org\n"
+                "Ответ 200 или 302 — всё в порядке, таймаут — доступа нет.",
+                exc,
+            )
+            raise
+        except TelegramUnauthorizedError:
+            log.error("Telegram отверг токен: проверь TELEGRAM_BOT_TOKEN в .env")
+            raise
         log.info("Telegram-бот @%s запущен, аккаунтов MAX: %d", me.username, len(self.accounts))
         await self.dp.start_polling(self.bot, handle_signals=False)
 

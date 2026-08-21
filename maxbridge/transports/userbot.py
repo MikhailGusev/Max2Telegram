@@ -66,27 +66,50 @@ class UserbotTransport(MaxTransport):
 
     # ------------------------------------------------------------ справочники
     def _absorb_directory(self, payload: dict[str, Any]) -> None:
-        """Разбирает ответ синхронизации: чаты и имена участников.
+        """Разбирает ответ синхронизации: имена людей и названия чатов.
 
         Схема ответа MAX не документирована и меняется, поэтому парсим мягко —
         любое непонятное поле просто пропускаем.
+
+        Порядок важен: сначала люди, потом чаты. Личные диалоги приходят вообще
+        без поля title (у MAX их 98 из 100), и название приходится собирать из
+        имени собеседника — без справочника имён получились бы «MAX -70123…».
         """
+        for key in ("contacts", "profiles", "users"):
+            for person in payload.get(key) or []:
+                if isinstance(person, dict):
+                    self._remember_person(person)
+
         for chat in payload.get("chats") or []:
             if not isinstance(chat, dict):
                 continue
             chat_id = chat.get("id")
             if not isinstance(chat_id, int):
                 continue
-            title = chat.get("title") or ""
+
             kind = str(chat.get("type") or "CHAT").lower()
-            self._kinds[chat_id] = "dialog" if kind == "dialog" else kind
+            kind = "dialog" if kind == "dialog" else kind
+            self._kinds[chat_id] = kind
+
+            title = str(chat.get("title") or "")
+            if not title and kind == "dialog":
+                title = self._dialog_title(chat)
             if title:
                 self._titles[chat_id] = title
 
-        for key in ("contacts", "profiles", "users"):
-            for person in payload.get(key) or []:
-                if isinstance(person, dict):
-                    self._remember_person(person)
+    def _dialog_title(self, chat: dict[str, Any]) -> str:
+        """Имя собеседника в личном диалоге: участник, который не я."""
+        participants = chat.get("participants")
+        if not isinstance(participants, dict):
+            return ""
+        for raw_id in participants:
+            try:
+                person_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if person_id and person_id != self.client.me_id:
+                return self._names.get(person_id, "")
+        return ""
 
     def _remember_person(self, person: dict[str, Any]) -> None:
         person_id = person.get("id")
@@ -136,12 +159,23 @@ class UserbotTransport(MaxTransport):
         if sender_id and sender_id not in self._names:
             await self._resolve_user(sender_id)
 
+        # в личном диалоге собеседник и есть название чата: если при
+        # синхронизации имени ещё не знали, забираем его из первого же письма
+        sender_name = self._names.get(sender_id, "")
+        if (
+            sender_name
+            and not self._titles.get(chat_id)
+            and self._kinds.get(chat_id, "dialog") == "dialog"
+            and sender_id != self.client.me_id
+        ):
+            self._titles[chat_id] = sender_name
+
         message = MaxMessage(
             chat_id=chat_id,
             message_id=str(raw.get("id") or ""),
             text=str(raw.get("text") or ""),
             sender_id=sender_id,
-            sender_name=self._names.get(sender_id, ""),
+            sender_name=sender_name,
             chat_title=self._titles.get(chat_id, ""),
             chat_kind=self._kinds.get(chat_id, "dialog"),
             ts=int(raw.get("time") or 0) or int(time.time() * 1000),

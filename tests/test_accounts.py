@@ -168,3 +168,40 @@ def test_broken_file_falls_back_to_env(base, tmp_path: Path) -> None:
     (tmp_path / "accounts.json").write_text("{ это не json", encoding="utf-8")
     registry = build_accounts(base, AiAssistant(""), team_license())
     assert len(registry) == 1 and registry.accounts[0].name == "default"
+
+
+def test_dialog_title_comes_from_the_other_participant() -> None:
+    """98 из 100 чатов MAX — личные диалоги вообще без поля title."""
+    from maxbridge.transports.userbot import UserbotTransport
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client.me_id = 100
+    transport._absorb_directory(
+        {
+            "contacts": [{"id": 200, "names": [{"name": "Пётр Иванов"}]}],
+            "chats": [
+                {"id": -1, "type": "DIALOG", "participants": {"100": 1, "200": 1}},
+                {"id": -2, "type": "CHAT", "title": "Рабочая группа"},
+                {"id": -3, "type": "DIALOG", "participants": {"100": 1, "999": 1}},
+            ],
+        }
+    )
+
+    assert transport.chat_title(-1) == "Пётр Иванов"
+    assert transport.chat_title(-2) == "Рабочая группа"
+    assert transport.chat_title(-3) == "", "имени нет в контактах — узнаем из письма"
+    assert transport._kinds[-1] == "dialog" and transport._kinds[-2] == "chat"
+
+
+def test_own_id_is_not_taken_as_dialog_title() -> None:
+    from maxbridge.transports.userbot import UserbotTransport
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client.me_id = 100
+    transport._absorb_directory(
+        {
+            "contacts": [{"id": 100, "names": [{"name": "Я сам"}]}],
+            "chats": [{"id": -1, "type": "DIALOG", "participants": {"100": 1, "200": 1}}],
+        }
+    )
+    assert transport.chat_title(-1) != "Я сам"
