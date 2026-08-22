@@ -82,12 +82,14 @@ class TelegramBridge:
         ai: AiAssistant,
         license_: License,
         transcriber: Transcriber | None = None,
+        billing: Any = None,
     ) -> None:
         self.config = config
         self.accounts = accounts
         self.ai = ai
         self.license = license_
         self.transcriber = transcriber or Transcriber()
+        self.billing = billing
         # прокси нужен там, где провайдер режет api.telegram.org (российские
         # хостинги). MAX при этом ходит напрямую — его сессия остаётся местной.
         session = None
@@ -339,6 +341,8 @@ class TelegramBridge:
         dp.message.register(self._cmd_rmrule, Command("rmrule"))
         dp.message.register(self._cmd_autoreply, Command("autoreply"))
         dp.message.register(self._cmd_license, Command("license"))
+        dp.message.register(self._cmd_premium, Command("premium"))
+        dp.message.register(self._cmd_grant, Command("grant"))
         dp.message.register(self._cmd_help, Command("help"))
         dp.message.register(self._on_topic_reply, F.message_thread_id.is_not(None), F.text)
         dp.message.register(
@@ -383,6 +387,7 @@ class TelegramBridge:
             "   действия: urgent, mute, autoreply=текст\n"
             "/rules, /rmrule N — список и удаление правил\n"
             "/autoreply текст — автоответ в текущей теме\n"
+            "/premium — оформить подписку\n"
             "/license — что включено в этой установке",
             parse_mode="HTML",
         )
@@ -456,12 +461,103 @@ class TelegramBridge:
                 f"<b>Чатов:</b> {state['chats']}  <b>Сообщений:</b> {state['messages']}\n"
                 f"<b>Отправлено:</b> {state['sent']}  <b>Ждут ответа:</b> {state['pending']}"
             )
+        if self.billing is not None:
+            blocks.append("💳 " + self.billing.status(message.from_user.id).describe())
         await message.answer("\n\n".join(blocks), parse_mode="HTML")
 
     async def _cmd_license(self, message: Message) -> None:
         if not await self._guard(message):
             return
         await message.answer(self.license.describe())
+
+    # ------------------------------------------------------------- подписка
+    async def _gate_ai(self, message: Message) -> bool:
+        """True — AI-действие разрешено (и списано). Иначе объясняет и вернёт False."""
+        if self.billing is None:
+            return True
+        user_id = message.from_user.id
+        if self.billing.can_use_ai(user_id):
+            self.billing.note_ai_use(user_id)
+            return True
+        await message.answer(
+            "🔒 На сегодня бесплатные AI-действия закончились "
+            f"({self.config.free_ai_per_day} в день).\n"
+            "Оформи Premium — AI без ограничений: /premium",
+        )
+        return False
+
+    async def _cmd_premium(self, message: Message) -> None:
+        if not await self._guard(message):
+            return
+        user_id = message.from_user.id
+        if self.billing is not None:
+            st = self.billing.status(user_id)
+            if st.premium:
+                await message.answer(f"У тебя Premium 💎\n{st.describe()}")
+                return
+
+        from ..core.payments import payment_url
+
+        url = payment_url(
+            user_id,
+            wallet=self.config.yoomoney_wallet,
+            amount=self.config.premium_price,
+            site_url=self.config.site_url,
+        )
+        text = (
+            f"<b>Premium — {self.config.premium_price} ₽/мес</b>\n\n"
+            "• AI-приоритеты 🔥 на каждое сообщение\n"
+            "• AI-черновики ответов без лимита\n"
+            "• Сводки «что я пропустил»\n"
+            "• Голосовые → текст\n"
+            "• Эскалация в SMS и WhatsApp\n\n"
+        )
+        if url:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить картой", url=url)]]
+            )
+            await message.answer(
+                text + "После оплаты Premium включится автоматически.",
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        else:
+            await message.answer(
+                text + "Оплата пока не настроена — напиши владельцу для доступа.",
+                parse_mode="HTML",
+            )
+
+    async def _cmd_grant(self, message: Message) -> None:
+        """Только владелец: выдать Premium другу. /grant <user_id> <дней>."""
+        if not await self._guard(message):
+            return
+        if self.billing is None:
+            await message.answer("Биллинг выключен.")
+            return
+        parts = _command_arg(message.text).split()
+        if len(parts) != 2 or not parts[0].lstrip("-").isdigit() or not parts[1].isdigit():
+            await message.answer(
+                "Формат: /grant &lt;user_id&gt; &lt;дней&gt;\n"
+                "Например: /grant 74906080 180 — премиум на полгода.\n"
+                "Сроки: 30 / 150 / 180 / 365.\n"
+                "user_id друга — через @userinfobot.",
+                parse_mode="HTML",
+            )
+            return
+        target, days = int(parts[0]), int(parts[1])
+        until = self.billing.grant_premium(target, days=days, by=f"owner:{message.from_user.id}")
+        from datetime import datetime, timezone
+
+        when = datetime.fromtimestamp(until, timezone.utc).astimezone()
+        await message.answer(f"Готово: Premium для {target} до {when:%d.%m.%Y}.")
+        try:
+            await self.bot.send_message(
+                target,
+                f"🎉 Тебе выдали Premium в MaxBridge до {when:%d.%m.%Y}. "
+                "AI-функции теперь без ограничений.",
+            )
+        except TelegramBadRequest:
+            pass  # друг ещё не писал боту — узнает сам через /status
 
     async def _cmd_chats(self, message: Message) -> None:
         if not await self._guard(message):
@@ -554,6 +650,9 @@ class TelegramBridge:
 
     async def _cmd_digest(self, message: Message) -> None:
         if not await self._guard(message):
+            return
+        # сводка использует AI — тратит бесплатное действие (у premium безлимит)
+        if self.ai.enabled and not await self._gate_ai(message):
             return
         blocks = []
         for account in self.accounts.owned_by(message.from_user.id):
@@ -754,6 +853,16 @@ class TelegramBridge:
             await query.answer()
 
     async def _make_drafts(self, query: CallbackQuery, account: Account, chat_id: int) -> None:
+        # черновики — AI-действие: списываем бесплатное (у premium безлимит)
+        if self.billing is not None:
+            user_id = query.from_user.id
+            if not self.billing.can_use_ai(user_id):
+                await query.answer(
+                    "Бесплатные AI-действия на сегодня кончились. Premium: /premium",
+                    show_alert=True,
+                )
+                return
+            self.billing.note_ai_use(user_id)
         await query.answer("Думаю…")
         history = account.router.context_lines(chat_id)
         incoming = history[-1] if history else ""

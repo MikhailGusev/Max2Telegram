@@ -10,6 +10,7 @@ from .accounts import Account, AccountRegistry, build_accounts
 from .channels import build_channels, build_inbound
 from .config import Config, load_config
 from .core.ai import AiAssistant
+from .core.billing import Billing
 from .core.digest import digest_scheduler
 from .core.escalation import Escalator
 from .core.followup import followup_watcher
@@ -36,9 +37,15 @@ class Application:
         self.transcriber = Transcriber(
             config.asr_url, config.asr_key, config.asr_model, config.asr_lang
         )
+        # подписки и дневной AI-лимит — одна база на инсталляцию
+        self.billing = Billing(
+            config.db_path.parent / "billing.db", free_ai_per_day=config.free_ai_per_day
+        )
         self.accounts: AccountRegistry = build_accounts(config, self.ai, self.license)
+        for account in self.accounts:
+            account.router.attach_billing(self.billing)
         self.telegram = TelegramBridge(
-            config, self.accounts, self.ai, self.license, self.transcriber
+            config, self.accounts, self.ai, self.license, self.transcriber, self.billing
         )
 
         # каналы эскалации общие: незачем держать по подключению на аккаунт
@@ -139,6 +146,7 @@ class Application:
         await self.telegram.close()
         await self.ai.aclose()
         await self.transcriber.close()
+        self.billing.close()
         for channel in self.channels:
             await channel.close()
 

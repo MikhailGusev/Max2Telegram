@@ -45,10 +45,14 @@ class Router:
         self.transport = transport
         self.ai = ai
         self.telegram: TelegramSink | None = None
+        self.billing: Any = None
         self._seen: set[tuple[int, str]] = set()
 
     def attach_telegram(self, sink: TelegramSink) -> None:
         self.telegram = sink
+
+    def attach_billing(self, billing: Any) -> None:
+        self.billing = billing
 
     # ------------------------------------------------------- MAX -> Telegram
     async def handle_max_message(self, message: MaxMessage) -> None:
@@ -105,6 +109,10 @@ class Router:
     async def _maybe_refine(self, message: MaxMessage, verdict: Verdict) -> Verdict:
         """Спрашиваем модель только там, где правила не дали уверенного ответа."""
         if not self.ai.enabled or not self.config.ai_active:
+            return verdict
+        # умные AI-приоритеты на каждое входящее — премиум-функция: на free
+        # это мгновенно сожгло бы дневной лимит. Free живёт на правилах.
+        if self.billing is not None and not self.billing.is_premium(self.config.owner_id):
             return verdict
         if verdict.priority != "normal" or verdict.intent:
             return verdict  # правила уже всё решили — экономим вызов
