@@ -802,10 +802,17 @@ class TelegramBridge:
     # --------------------------------------------------------------- запуск
     async def run(self) -> None:
         for account in self.accounts:
-            if not account.forum_chat_id:
-                stored = account.storage.get("forum_chat_id")
-                if stored:
-                    self.accounts.rebind(account, int(stored))
+            # /bind — авторитетный источник: если группу привязывали командой,
+            # сохранённый id главнее значения из .env (там может остаться
+            # заглушка из шаблона, из-за которой доставка уходит в никуда).
+            stored = account.storage.get("forum_chat_id")
+            if stored and int(stored) != account.forum_chat_id:
+                self.accounts.rebind(account, int(stored))
+                log.info(
+                    "аккаунт «%s»: группа-приёмник восстановлена из /bind (%s)",
+                    account.name,
+                    stored,
+                )
         try:
             me = await self.bot.get_me()
         except TelegramNetworkError as exc:

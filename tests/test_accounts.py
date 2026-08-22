@@ -265,3 +265,24 @@ def test_command_arg_survives_mobile_nbsp() -> None:
     assert _command_arg("/write") == ""
     assert _command_arg("") == ""
     assert _command_arg(None) == ""
+
+
+def test_bind_survives_env_placeholder(base, tmp_path: Path) -> None:
+    """Сохранённый /bind должен побеждать заглушку forum_chat_id из .env.
+
+    Иначе после рестарта под systemd доставка уходит в несуществующую группу.
+    """
+    base.forum_chat_id = -1001234567890  # фейк из шаблона .env
+    registry = build_accounts(base, AiAssistant(""), load_license(""))
+    account = registry.accounts[0]
+    # пользователь привязал реальную группу командой /bind (сохранилось в БД)
+    account.storage.set("forum_chat_id", "-1009999999999")
+
+    # эмуляция восстановления привязки на старте (логика из TelegramBridge.run)
+    stored = account.storage.get("forum_chat_id")
+    if stored and int(stored) != account.forum_chat_id:
+        registry.rebind(account, int(stored))
+
+    assert account.forum_chat_id == -1009999999999
+    assert registry.by_forum(-1009999999999) is account
+    assert registry.by_forum(-1001234567890) is None
