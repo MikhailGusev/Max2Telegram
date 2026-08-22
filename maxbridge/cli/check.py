@@ -55,9 +55,12 @@ async def check_flow() -> int:
     else:
         print("\nTelegram: напрямую (api.telegram.org должен быть доступен)")
 
-    print(f"AI: {'✓ включён' if config.ai_active else '✗ выключен (нет ANTHROPIC_API_KEY)'}")
+    print(f"AI: {'✓ включён' if config.ai_active else '✗ выключен (нет AI_KEY)'}")
     if config.ai_active:
-        print(f"  модель: {config.ai_model}")
+        from ..core.ai import PROVIDERS
+
+        model = config.ai_model or PROVIDERS.get(config.ai_provider, ("", "?"))[1]
+        print(f"  провайдер: {config.ai_provider}, модель: {model}")
         if config.ai_proxy:
             print(f"  прокси: {_hide_credentials(config.ai_proxy)} (только для Anthropic)")
         else:

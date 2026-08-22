@@ -88,6 +88,33 @@ def test_ai_stays_off_without_key_even_with_proxy() -> None:
     assert not AiAssistant("", proxy="http://1.2.3.4:3128").enabled
 
 
+def test_ai_provider_picks_endpoint_and_model() -> None:
+    """Провайдер задаёт базовый URL и модель по умолчанию."""
+    from maxbridge.core.ai import AiAssistant
+
+    qwen = AiAssistant("k", provider="qwen")
+    assert qwen.enabled
+    assert "dashscope" in qwen.base_url and qwen.model == "qwen-plus"
+
+    deepseek = AiAssistant("k", provider="deepseek")
+    assert "deepseek.com" in deepseek.base_url and deepseek.model == "deepseek-chat"
+
+    # явная модель переопределяет дефолт провайдера
+    assert AiAssistant("k", model="qwen-max", provider="qwen").model == "qwen-max"
+
+    # неизвестный провайдер -> откат на qwen, не падаем
+    assert "dashscope" in AiAssistant("k", provider="нечто").base_url
+
+
+def test_ai_json_extraction_tolerates_wrapping_text() -> None:
+    """Модель иногда добавляет пояснения вокруг JSON — вырезаем объект."""
+    from maxbridge.core.ai import _extract_json
+
+    assert _extract_json('{"priority":"urgent"}')["priority"] == "urgent"
+    assert _extract_json('Вот ответ: {"priority":"low"} готово')["priority"] == "low"
+    assert _extract_json("совсем не json") is None
+
+
 def test_token_extraction_handles_what_people_actually_paste() -> None:
     """Из браузера копируют по-разному — вырезать руками не должно требоваться."""
     from maxbridge.cli.login import _extract_token

@@ -29,6 +29,7 @@ class Application:
             config.anthropic_key if config.ai_enabled else "",
             model=config.ai_model,
             lang=config.ai_lang,
+            provider=config.ai_provider,
             proxy=config.ai_proxy,
             base_url=config.ai_base_url,
         )
@@ -136,6 +137,7 @@ class Application:
         for account in self.accounts:
             await account.close()
         await self.telegram.close()
+        await self.ai.aclose()
         await self.transcriber.close()
         for channel in self.channels:
             await channel.close()

@@ -47,7 +47,8 @@ class Config:
     max_bot_token: str
     max_api_base: str
 
-    anthropic_key: str
+    ai_provider: str  # qwen | deepseek | openai
+    anthropic_key: str  # общий AI-ключ (имя историческое)
     ai_model: str
     ai_enabled: bool
     ai_lang: str
@@ -135,8 +136,10 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         max_phone=os.getenv("MAX_PHONE", "").strip(),
         max_bot_token=os.getenv("MAX_BOT_TOKEN", "").strip(),
         max_api_base=os.getenv("MAX_API_BASE", "https://platform-api.max.ru").strip().rstrip("/"),
-        anthropic_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
-        ai_model=os.getenv("AI_MODEL", "claude-opus-5").strip(),
+        ai_provider=os.getenv("AI_PROVIDER", "qwen").strip().lower(),
+        # AI_KEY — основной; ANTHROPIC_API_KEY принимается для совместимости
+        anthropic_key=(os.getenv("AI_KEY", "") or os.getenv("ANTHROPIC_API_KEY", "")).strip(),
+        ai_model=os.getenv("AI_MODEL", "").strip(),
         ai_enabled=_bool("AI_ENABLED", True),
         ai_lang=os.getenv("AI_LANG", "ru").strip(),
         ai_proxy=os.getenv("AI_PROXY", "").strip(),
