@@ -7,10 +7,9 @@ import logging
 from typing import Any
 
 from .accounts import Account, AccountRegistry, build_accounts
-from .channels import build_channels, build_inbound
+from .channels import build_billing, build_channels, build_inbound
 from .config import Config, load_config
 from .core.ai import AiAssistant
-from .core.billing import Billing
 from .core.digest import digest_scheduler
 from .core.escalation import Escalator
 from .core.followup import followup_watcher
@@ -37,10 +36,9 @@ class Application:
         self.transcriber = Transcriber(
             config.asr_url, config.asr_key, config.asr_model, config.asr_lang
         )
-        # подписки и дневной AI-лимит — одна база на инсталляцию
-        self.billing = Billing(
-            config.db_path.parent / "billing.db", free_ai_per_day=config.free_ai_per_day
-        )
+        # монетизация — из приватного слоя (если установлен). Нет слоя ->
+        # None, и мост работает как полностью бесплатный.
+        self.billing = build_billing(config)
         self.accounts: AccountRegistry = build_accounts(config, self.ai, self.license)
         for account in self.accounts:
             account.router.attach_billing(self.billing)
@@ -146,7 +144,8 @@ class Application:
         await self.telegram.close()
         await self.ai.aclose()
         await self.transcriber.close()
-        self.billing.close()
+        if self.billing is not None:
+            self.billing.close()
         for channel in self.channels:
             await channel.close()
 

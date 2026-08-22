@@ -490,20 +490,15 @@ class TelegramBridge:
         if not await self._guard(message):
             return
         user_id = message.from_user.id
-        if self.billing is not None:
-            st = self.billing.status(user_id)
-            if st.premium:
-                await message.answer(f"У тебя Premium 💎\n{st.describe()}")
-                return
+        if self.billing is None:
+            await message.answer("Это бесплатная версия — все функции уже доступны.")
+            return
+        st = self.billing.status(user_id)
+        if st.premium:
+            await message.answer(f"У тебя Premium 💎\n{st.describe()}")
+            return
 
-        from ..core.payments import payment_url
-
-        url = payment_url(
-            user_id,
-            wallet=self.config.yoomoney_wallet,
-            amount=self.config.premium_price,
-            site_url=self.config.site_url,
-        )
+        url = self.billing.payment_url(user_id)
         text = (
             f"<b>Premium — {self.config.premium_price} ₽/мес</b>\n\n"
             "• AI-приоритеты 🔥 на каждое сообщение\n"

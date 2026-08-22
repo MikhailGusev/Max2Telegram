@@ -24,11 +24,12 @@ from .base import ChannelError, NotifyChannel
 
 log = logging.getLogger("maxbridge.channels")
 
-__all__ = ["NotifyChannel", "ChannelError", "build_channels", "build_inbound"]
+__all__ = ["NotifyChannel", "ChannelError", "build_channels", "build_inbound", "build_billing"]
 
-#: точки входа: исходящие уведомления и приём ответов
+#: точки входа: исходящие уведомления, приём ответов, биллинг
 CHANNELS_GROUP = "maxbridge.channels"
 INBOUND_GROUP = "maxbridge.inbound"
+BILLING_GROUP = "maxbridge.billing"
 
 
 def _load(group: str) -> list[tuple[str, Callable[..., Any]]]:
@@ -75,4 +76,20 @@ def build_inbound(config: Config, on_reply: Callable[[str, str], Any]) -> Any | 
             continue
         if server is not None:
             return server
+    return None
+
+
+def build_billing(config: Config) -> Any | None:
+    """Движок подписок из приватного слоя. None -> монетизации нет, всё
+    бесплатно и без лимитов (чистый публичный мост)."""
+    for name, factory in _load(BILLING_GROUP):
+        try:
+            billing = factory(config)
+        except Exception:  # noqa: BLE001
+            log.exception("биллинг «%s» не собрался", name)
+            continue
+        if billing is not None:
+            log.info("монетизация активна (слой «%s»)", name)
+            return billing
+    log.info("монетизация не подключена — все функции бесплатны без лимитов")
     return None
