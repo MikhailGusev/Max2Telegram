@@ -205,3 +205,49 @@ def test_own_id_is_not_taken_as_dialog_title() -> None:
         }
     )
     assert transport.chat_title(-1) != "Я сам"
+
+
+def test_write_finds_chat_by_name() -> None:
+    """/write ищет чат по подстроке имени среди чатов и контактов."""
+    from maxbridge.transports.userbot import UserbotTransport
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client.me_id = 100
+    transport._absorb_directory(
+        {
+            "contacts": [
+                {"id": 200, "names": [{"name": "Пётр Иванов"}]},
+                {"id": 201, "names": [{"name": "Мария Пётрова"}]},
+            ],
+            "chats": [{"id": -5, "type": "CHAT", "title": "Отдел продаж"}],
+        }
+    )
+
+    assert transport.find_chats("продаж") == [(-5, "Отдел продаж")]
+    # по контакту, у которого нет отдельного чата в _titles
+    assert (201, "Мария Пётрова") in transport.find_chats("мария")
+
+
+def test_write_returns_all_matches_for_ambiguous_query() -> None:
+    from maxbridge.transports.userbot import UserbotTransport
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client.me_id = 100
+    transport._absorb_directory(
+        {
+            "contacts": [
+                {"id": 200, "names": [{"name": "Пётр Иванов"}]},
+                {"id": 201, "names": [{"name": "Пётр Сидоров"}]},
+            ],
+            "chats": [],
+        }
+    )
+    matches = transport.find_chats("пётр")
+    assert len(matches) == 2, "оба Петра — команда должна попросить уточнить"
+
+
+def test_write_empty_query_finds_nothing() -> None:
+    from maxbridge.transports.userbot import UserbotTransport
+
+    transport = UserbotTransport("не-важно.json")
+    assert transport.find_chats("") == []

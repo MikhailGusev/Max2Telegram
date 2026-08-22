@@ -75,3 +75,11 @@ class MaxTransport(abc.ABC):
     def chat_title(self, chat_id: int) -> str:
         """Известное имя чата (может быть пустым — тогда роутер возьмёт из БД)."""
         return ""
+
+    def find_chats(self, query: str, limit: int = 10) -> list[tuple[int, str]]:
+        """Ищет чаты MAX по подстроке имени — для команды /write.
+
+        Возвращает список (chat_id, title). Транспорт, не знающий заранее
+        список чатов (botapi), вернёт пусто — тогда /write работать не сможет.
+        """
+        return []

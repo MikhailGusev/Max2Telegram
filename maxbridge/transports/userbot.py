@@ -145,6 +145,32 @@ class UserbotTransport(MaxTransport):
     def chat_title(self, chat_id: int) -> str:
         return self._titles.get(chat_id, "")
 
+    def find_chats(self, query: str, limit: int = 10) -> list[tuple[int, str]]:
+        """Поиск по синхронизированному при входе списку чатов и по контактам.
+
+        Сначала ищем среди названий чатов (групп и диалогов), затем — по именам
+        контактов: у контакта id совпадает с chat_id личного диалога в MAX.
+        """
+        q = query.strip().casefold()
+        if not q:
+            return []
+
+        found: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        for chat_id, title in self._titles.items():
+            if title and q in title.casefold():
+                found.append((chat_id, title))
+                seen.add(chat_id)
+
+        # диалоги без названия — по имени собеседника из контактов
+        for user_id, name in self._names.items():
+            if user_id not in seen and name and q in name.casefold():
+                found.append((user_id, name))
+                seen.add(user_id)
+
+        found.sort(key=lambda item: (len(item[1]), item[1].casefold()))
+        return found[:limit]
+
     # --------------------------------------------------------------- события
     async def _on_packet(self, packet: dict[str, Any]) -> None:
         if packet.get("opcode") != Op.EVT_NEW_MESSAGE:

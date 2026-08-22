@@ -211,20 +211,28 @@ class TelegramBridge:
         return sent.message_id
 
     async def _ensure_topic(self, account: Account, message: MaxMessage) -> int:
-        chat = account.storage.get_chat(message.chat_id)
+        title = message.chat_title or message.sender_name or f"MAX {message.chat_id}"
+        return await self._ensure_topic_by(account, message.chat_id, title, message.chat_kind)
+
+    async def _ensure_topic_by(
+        self, account: Account, chat_id: int, title: str, kind: str = "dialog"
+    ) -> int:
+        """Тема для чата по его id — общий путь для входящих и для /write."""
+        chat = account.storage.get_chat(chat_id)
         if chat is not None and chat["tg_topic_id"]:
             return int(chat["tg_topic_id"])
 
-        title = message.chat_title or message.sender_name or f"MAX {message.chat_id}"
+        name = title or f"MAX {chat_id}"
+        account.storage.upsert_chat(chat_id, title, kind)
         created = await self.bot.create_forum_topic(
-            chat_id=account.forum_chat_id, name=title[:128]
+            chat_id=account.forum_chat_id, name=name[:128]
         )
-        account.storage.bind_topic(message.chat_id, created.message_thread_id)
+        account.storage.bind_topic(chat_id, created.message_thread_id)
         log.info(
             "аккаунт «%s»: создана тема «%s» для чата MAX %s",
             account.name,
-            title,
-            message.chat_id,
+            name,
+            chat_id,
         )
         return created.message_thread_id
 
@@ -312,6 +320,7 @@ class TelegramBridge:
         dp.message.register(self._cmd_status, Command("status"))
         dp.message.register(self._cmd_accounts, Command("accounts"))
         dp.message.register(self._cmd_chats, Command("chats"))
+        dp.message.register(self._cmd_write, Command("write"))
         dp.message.register(self._cmd_find, Command("find"))
         dp.message.register(self._cmd_digest, Command("digest"))
         dp.message.register(self._cmd_rule, Command("rule"))
@@ -356,6 +365,7 @@ class TelegramBridge:
             "/status — состояние моста и статистика\n"
             f"{extra}"
             "/chats — список чатов MAX и их тем\n"
+            "/write имя — начать чат с кем-то из MAX\n"
             "/find слово — поиск по всей истории MAX\n"
             "/digest — сводка «что я пропустил» за сутки\n"
             "/rule срочно|urgent — правило приоритета\n"
@@ -457,6 +467,56 @@ class TelegramBridge:
             flags = "".join(["⭐" if row["vip"] else "", "🔕" if row["muted"] else ""])
             lines.append(f"{flags} {row['title'] or row['max_chat_id']}")
         await message.answer("\n".join(lines))
+
+    async def _cmd_write(self, message: Message) -> None:
+        """Начать чат с кем-то из MAX: находим по имени и открываем тему."""
+        if not await self._guard(message):
+            return
+        account = await self._need_account(message)
+        if account is None:
+            return
+
+        query = (message.text or "").partition(" ")[2].strip()
+        if not query:
+            await message.answer(
+                "Кому написать? Например: /write Пётр\n"
+                "Ищу по имени среди твоих чатов и контактов MAX."
+            )
+            return
+
+        matches = account.transport.find_chats(query, limit=8)
+        if not matches:
+            await message.answer(
+                f"Никого похожего на «{query}» не нашёл среди чатов MAX.\n"
+                "Попробуй другое написание имени."
+            )
+            return
+
+        if len(matches) > 1:
+            lines = "\n".join(f"• {html.escape(title)}" for _, title in matches)
+            await message.answer(
+                f"Нашёл несколько — уточни имя, чтобы остался один вариант:\n{lines}"
+            )
+            return
+
+        chat_id, title = matches[0]
+        try:
+            topic_id = await self._ensure_topic_by(account, chat_id, title, "dialog")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("не смог создать тему для /write")
+            await message.answer(f"Не смог открыть тему: {exc}")
+            return
+
+        await self.bot.send_message(
+            chat_id=account.forum_chat_id,
+            message_thread_id=topic_id,
+            text=(
+                f"✍️ Чат с <b>{html.escape(title)}</b> открыт.\n"
+                "Пиши сюда — сообщения уйдут в MAX от твоего имени."
+            ),
+            parse_mode="HTML",
+        )
+        await message.answer(f"Готово: тема «{title}» создана.")
 
     async def _cmd_find(self, message: Message) -> None:
         if not await self._guard(message):
