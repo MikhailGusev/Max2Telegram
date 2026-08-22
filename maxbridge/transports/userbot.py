@@ -45,6 +45,9 @@ class UserbotTransport(MaxTransport):
         self._titles: dict[int, str] = {}
         self._kinds: dict[int, str] = {}
         self._names: dict[int, str] = {}
+        #: id собеседника -> id его личного диалога. Нужно, чтобы /write слал
+        #: сообщение в чат, а не в id контакта (это разные числа в MAX).
+        self._dialog_by_user: dict[int, int] = {}
         self._task: asyncio.Task[None] | None = None
         self._resolving: set[int] = set()
 
@@ -91,11 +94,27 @@ class UserbotTransport(MaxTransport):
             kind = "dialog" if kind == "dialog" else kind
             self._kinds[chat_id] = kind
 
+            if kind == "dialog":
+                self._map_dialog(chat_id, chat)
+
             title = str(chat.get("title") or "")
             if not title and kind == "dialog":
                 title = self._dialog_title(chat)
             if title:
                 self._titles[chat_id] = title
+
+    def _map_dialog(self, chat_id: int, chat: dict[str, Any]) -> None:
+        """Запоминает, какому диалогу соответствует собеседник."""
+        participants = chat.get("participants")
+        if not isinstance(participants, dict):
+            return
+        for raw_id in participants:
+            try:
+                person_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if person_id and person_id != self.client.me_id:
+                self._dialog_by_user[person_id] = chat_id
 
     def _dialog_title(self, chat: dict[str, Any]) -> str:
         """Имя собеседника в личном диалоге: участник, который не я."""
@@ -162,11 +181,16 @@ class UserbotTransport(MaxTransport):
                 found.append((chat_id, title))
                 seen.add(chat_id)
 
-        # диалоги без названия — по имени собеседника из контактов
+        # по имени собеседника: отправлять нужно в ЕГО ДИАЛОГ (chat_id),
+        # а не в id контакта — это разные числа, иначе MAX ответит not.found
         for user_id, name in self._names.items():
-            if user_id not in seen and name and q in name.casefold():
-                found.append((user_id, name))
-                seen.add(user_id)
+            if not name or q not in name.casefold():
+                continue
+            dialog_id = self._dialog_by_user.get(user_id)
+            if dialog_id is None or dialog_id in seen:
+                continue
+            found.append((dialog_id, name))
+            seen.add(dialog_id)
 
         found.sort(key=lambda item: (len(item[1]), item[1].casefold()))
         return found[:limit]

@@ -207,25 +207,41 @@ def test_own_id_is_not_taken_as_dialog_title() -> None:
     assert transport.chat_title(-1) != "Я сам"
 
 
-def test_write_finds_chat_by_name() -> None:
-    """/write ищет чат по подстроке имени среди чатов и контактов."""
+def test_write_returns_dialog_id_not_contact_id() -> None:
+    """/write должен вернуть id ДИАЛОГА, а не id контакта — иначе not.found."""
     from maxbridge.transports.userbot import UserbotTransport
 
     transport = UserbotTransport("не-важно.json")
     transport.client.me_id = 100
     transport._absorb_directory(
         {
-            "contacts": [
-                {"id": 200, "names": [{"name": "Пётр Иванов"}]},
-                {"id": 201, "names": [{"name": "Мария Пётрова"}]},
+            "contacts": [{"id": 200, "names": [{"name": "Манечка"}]}],
+            "chats": [
+                {"id": -5, "type": "CHAT", "title": "Отдел продаж"},
+                # личный диалог с контактом 200: его id (-68…) ≠ id контакта 200
+                {"id": -68093, "type": "DIALOG", "participants": {"100": 1, "200": 1}},
             ],
-            "chats": [{"id": -5, "type": "CHAT", "title": "Отдел продаж"}],
         }
     )
 
     assert transport.find_chats("продаж") == [(-5, "Отдел продаж")]
-    # по контакту, у которого нет отдельного чата в _titles
-    assert (201, "Мария Пётрова") in transport.find_chats("мария")
+    # ищем по имени — получаем id диалога, а не 200
+    assert transport.find_chats("манечка") == [(-68093, "Манечка")]
+
+
+def test_write_skips_contact_without_dialog() -> None:
+    """Контакт без синхронизированного диалога писать нельзя — не предлагаем."""
+    from maxbridge.transports.userbot import UserbotTransport
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client.me_id = 100
+    transport._absorb_directory(
+        {
+            "contacts": [{"id": 201, "names": [{"name": "Незнакомец"}]}],
+            "chats": [],  # диалога с ним нет
+        }
+    )
+    assert transport.find_chats("незнакомец") == []
 
 
 def test_write_returns_all_matches_for_ambiguous_query() -> None:
@@ -239,11 +255,15 @@ def test_write_returns_all_matches_for_ambiguous_query() -> None:
                 {"id": 200, "names": [{"name": "Пётр Иванов"}]},
                 {"id": 201, "names": [{"name": "Пётр Сидоров"}]},
             ],
-            "chats": [],
+            "chats": [
+                {"id": -301, "type": "DIALOG", "participants": {"100": 1, "200": 1}},
+                {"id": -302, "type": "DIALOG", "participants": {"100": 1, "201": 1}},
+            ],
         }
     )
     matches = transport.find_chats("пётр")
     assert len(matches) == 2, "оба Петра — команда должна попросить уточнить"
+    assert {cid for cid, _ in matches} == {-301, -302}, "id диалогов, не контактов"
 
 
 def test_write_empty_query_finds_nothing() -> None:
