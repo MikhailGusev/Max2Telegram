@@ -251,3 +251,17 @@ def test_write_empty_query_finds_nothing() -> None:
 
     transport = UserbotTransport("не-важно.json")
     assert transport.find_chats("") == []
+
+
+def test_command_arg_survives_mobile_nbsp() -> None:
+    """Мобильный Telegram вставляет неразрывный пробел — /write Манечка ломался."""
+    from maxbridge.telegram.bridge import _command_arg
+
+    assert _command_arg("/write Манечка") == "Манечка"
+    assert _command_arg("/write\u00a0Манечка") == "Манечка"      # U+00A0
+    assert _command_arg("/write@Max2TelegramBridge_bot Манечка") == "Манечка"
+    assert _command_arg("/rule счёт|urgent") == "счёт|urgent"
+    assert _command_arg("/find\tдоговор") == "договор"
+    assert _command_arg("/write") == ""
+    assert _command_arg("") == ""
+    assert _command_arg(None) == ""

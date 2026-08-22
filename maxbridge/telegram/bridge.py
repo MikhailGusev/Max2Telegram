@@ -36,17 +36,28 @@ from aiogram.types import (
 
 from ..accounts import Account, AccountRegistry
 from ..config import Config
-from ..core.ai import AiAssistant
+from ..core.ai import AiAssistant, _hide_credentials as _hide_proxy
 from ..core.digest import build_digest
 from ..core.licensing import License
 from ..core.rules import Verdict
-from ..core.ai import _hide_credentials as _hide_proxy
 from ..core.transcribe import Transcriber
 from ..models import MaxMessage
 
 log = logging.getLogger("maxbridge.telegram")
 
 PRIORITY_MARK = {"urgent": "🔥", "normal": "", "low": "· "}
+
+
+def _command_arg(text: str | None) -> str:
+    """Всё после команды. Режем по ЛЮБОМУ пробелу, а не только обычному.
+
+    Мобильные клиенты часто вставляют неразрывный пробел (U+00A0) между
+    командой и аргументом — при разборе по обычному пробелу аргумент терялся,
+    и `/write Манечка` выглядел как пустой. str.split() бьёт по всем видам
+    пробелов, включая неразрывный.
+    """
+    parts = (text or "").split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
 
 #: боты Telegram не могут ни скачивать, ни отправлять файлы больше 50 МБ
 MAX_TELEGRAM_UPLOAD = 50 * 1024 * 1024
@@ -381,7 +392,7 @@ class TelegramBridge:
             return
 
         owned = self.accounts.owned_by(message.from_user.id)
-        argument = (message.text or "").partition(" ")[2].strip()
+        argument = _command_arg(message.text)
         if argument:
             account = self.accounts.by_name(argument)
             if account is None:
@@ -476,7 +487,7 @@ class TelegramBridge:
         if account is None:
             return
 
-        query = (message.text or "").partition(" ")[2].strip()
+        query = _command_arg(message.text)
         if not query:
             await message.answer(
                 "Кому написать? Например: /write Пётр\n"
@@ -521,7 +532,7 @@ class TelegramBridge:
     async def _cmd_find(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        query = (message.text or "").partition(" ")[2].strip()
+        query = _command_arg(message.text)
         if not query:
             await message.answer("Что ищем? Например: /find договор")
             return
@@ -558,7 +569,7 @@ class TelegramBridge:
         account = await self._need_account(message)
         if account is None:
             return
-        payload = (message.text or "").partition(" ")[2].strip()
+        payload = _command_arg(message.text)
         if "|" not in payload:
             await message.answer(
                 "Формат: /rule слово|действие\n"
@@ -598,7 +609,7 @@ class TelegramBridge:
         account = await self._need_account(message)
         if account is None:
             return
-        raw = (message.text or "").partition(" ")[2].strip()
+        raw = _command_arg(message.text)
         if not raw.isdigit():
             await message.answer("Формат: /rmrule 3")
             return
@@ -615,7 +626,7 @@ class TelegramBridge:
         if chat is None:
             await message.answer("Не понял, какому чату MAX принадлежит эта тема.")
             return
-        text = (message.text or "").partition(" ")[2].strip()
+        text = _command_arg(message.text)
         account.storage.set_chat_flag(int(chat["max_chat_id"]), "autoreply", text)
         await message.answer("Автоответ выключен." if not text else f"Автоответ: {text}")
 
