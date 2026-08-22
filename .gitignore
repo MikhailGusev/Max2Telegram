@@ -18,6 +18,7 @@ logs/
 
 # ---- документы разработчика (не для публичного репо) ----
 SERVER_HANDOFF.md
+HANDOFF_MAXBRIDGE.md
 PROJECT_SUMMARY.md
 NOTES_*.md
 
