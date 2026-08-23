@@ -110,29 +110,36 @@ class TelegramBridge:
     async def deliver(
         self, account: Account, message: MaxMessage, verdict: Verdict
     ) -> int | None:
-        """Кладёт входящее MAX-сообщение в тему его чата."""
-        if not account.forum_chat_id:
-            log.warning(
-                "аккаунт «%s»: не задана группа-приёмник, сообщение некуда положить. "
-                "Выполни /bind в нужной группе",
-                account.name,
-            )
-            return None
+        """Доставляет входящее MAX-сообщение владельцу.
 
-        topic_id = await self._ensure_topic(account, message)
-        text = self._render(message, verdict)
+        Два режима. Форум (Premium): у аккаунта привязана группа-форум — каждый
+        чат MAX едет в свою тему. Плоский (Free): группы нет — всё падает одной
+        лентой в личку владельцу, с подписью «чат · отправитель». Ответ в обоих
+        случаях — реплаем на сообщение (см. _on_topic_reply / _on_private_reply).
+        """
+        forum = bool(account.forum_chat_id)
+        if forum:
+            target = account.forum_chat_id
+            thread_id: int | None = await self._ensure_topic(account, message)
+        else:
+            target = account.owner_id
+            thread_id = None
+
+        text = self._render(message, verdict, flat=not forum)
         keyboard = self._keyboard(account, message, verdict)
 
         if message.attachments and account.transport.supports_media:
-            sent_id = await self._deliver_media(account, message, topic_id, text, keyboard)
+            sent_id = await self._deliver_media(
+                account, message, target, thread_id, text, keyboard
+            )
             if sent_id is not None:
                 return sent_id
             # не получилось перетащить файл — ниже уйдёт текст со ссылкой
 
         try:
             sent = await self.bot.send_message(
-                chat_id=account.forum_chat_id,
-                message_thread_id=topic_id,
+                chat_id=target,
+                message_thread_id=thread_id,
                 text=text,
                 parse_mode="HTML",
                 reply_markup=keyboard,
@@ -140,12 +147,12 @@ class TelegramBridge:
             )
         except TelegramBadRequest as exc:
             # тему могли удалить руками — заводим заново и пробуем ещё раз
-            if "thread not found" in str(exc).lower():
+            if thread_id is not None and "thread not found" in str(exc).lower():
                 account.storage.bind_topic(message.chat_id, 0)
-                topic_id = await self._ensure_topic(account, message)
+                thread_id = await self._ensure_topic(account, message)
                 sent = await self.bot.send_message(
-                    chat_id=account.forum_chat_id,
-                    message_thread_id=topic_id,
+                    chat_id=target,
+                    message_thread_id=thread_id,
                     text=text,
                     parse_mode="HTML",
                     reply_markup=keyboard,
@@ -158,7 +165,8 @@ class TelegramBridge:
         self,
         account: Account,
         message: MaxMessage,
-        topic_id: int,
+        target_chat_id: int,
+        thread_id: int | None,
         caption: str,
         keyboard: InlineKeyboardMarkup | None,
     ) -> int | None:
@@ -195,8 +203,8 @@ class TelegramBridge:
         # у медиа лимит подписи 1024 символа, у текста — 4096
         short = caption if len(caption) <= 1024 else caption[:1021] + "..."
         common: dict[str, Any] = {
-            "chat_id": account.forum_chat_id,
-            "message_thread_id": topic_id,
+            "chat_id": target_chat_id,
+            "message_thread_id": thread_id,
             "caption": short,
             "parse_mode": "HTML",
             "reply_markup": keyboard,
@@ -217,8 +225,8 @@ class TelegramBridge:
 
         if len(message.attachments) > 1:
             await self.bot.send_message(
-                chat_id=account.forum_chat_id,
-                message_thread_id=topic_id,
+                chat_id=target_chat_id,
+                message_thread_id=thread_id,
                 text=f"…и ещё вложений: {len(message.attachments) - 1}",
             )
         return sent.message_id
@@ -249,11 +257,20 @@ class TelegramBridge:
         )
         return created.message_thread_id
 
-    def _render(self, message: MaxMessage, verdict: Verdict) -> str:
+    def _render(self, message: MaxMessage, verdict: Verdict, *, flat: bool = False) -> str:
         mark = PRIORITY_MARK.get(verdict.priority, "")
         who = html.escape(message.sender_name or "неизвестный")
         body = html.escape(message.text or "")
-        parts = [f"{mark}<b>{who}</b>"]
+        if flat:
+            # одна лента: чат жирным, отправитель после точки — чтобы понять,
+            # откуда сообщение, без отдельной темы
+            chat = message.chat_title or message.sender_name or f"MAX {message.chat_id}"
+            header = f"{mark}<b>{html.escape(chat)}</b>"
+            if message.sender_name and message.sender_name != (message.chat_title or ""):
+                header += f" · {who}"
+            parts = [header]
+        else:
+            parts = [f"{mark}<b>{who}</b>"]
         if body:
             parts.append(body)
         for attachment in message.attachments:
@@ -350,6 +367,21 @@ class TelegramBridge:
             F.message_thread_id.is_not(None),
             F.photo | F.document | F.video | F.voice | F.audio,
         )
+        # плоский режим (Free без форума): ответ — реплай на сообщение из ленты
+        # в личке бота. Команды перехватываются выше, поэтому сюда доходит только
+        # обычный текст/медиа, отвечающий на конкретное сообщение.
+        dp.message.register(
+            self._on_private_reply,
+            F.chat.type == "private",
+            F.reply_to_message.is_not(None),
+            F.text,
+        )
+        dp.message.register(
+            self._on_private_media,
+            F.chat.type == "private",
+            F.reply_to_message.is_not(None),
+            F.photo | F.document | F.video | F.voice | F.audio,
+        )
         dp.callback_query.register(self._on_callback)
 
     async def _guard(self, event: Message | CallbackQuery) -> bool:
@@ -363,12 +395,17 @@ class TelegramBridge:
     async def _cmd_start(self, message: Message) -> None:
         if not await self._guard(message):
             return
-        await message.answer(
-            "MaxBridge на связи.\n\n"
-            "Каждый чат MAX появится здесь отдельной темой. "
-            "Отвечай прямо в теме — текст уйдёт в MAX от твоего имени.\n\n"
-            "Команды: /help"
+        account = self._account_for(message)
+        forum = account is not None and bool(account.forum_chat_id)
+        how = (
+            "Каждый чат MAX появится отдельной темой в группе. "
+            "Отвечай прямо в теме — текст уйдёт в MAX от твоего имени."
+            if forum
+            else "Сообщения из MAX приходят сюда одной лентой. Чтобы ответить — "
+            "сделай реплай на нужное сообщение, и текст уйдёт в MAX от твоего "
+            "имени.\n\nХочешь каждый чат отдельной темой — это Premium: /premium"
         )
+        await message.answer(f"MaxBridge на связи.\n\n{how}\n\nКоманды: /help")
 
     async def _cmd_help(self, message: Message) -> None:
         if not await self._guard(message):
@@ -394,6 +431,17 @@ class TelegramBridge:
 
     async def _cmd_bind(self, message: Message) -> None:
         if not await self._guard(message):
+            return
+
+        # отдельные темы (форум-группа) — функция Premium. Без подписки входящие
+        # приходят одной лентой в личку, привязывать группу незачем.
+        if self.billing is not None and not self.billing.is_premium(message.from_user.id):
+            await message.answer(
+                "🔒 Отдельные темы (форум-группа) — функция Premium.\n\n"
+                "Сейчас все чаты приходят одной лентой сюда, в личку: отвечай "
+                "реплаем на нужное сообщение — уйдёт в MAX.\n"
+                "Открыть отдельные темы: /premium"
+            )
             return
 
         owned = self.accounts.owned_by(message.from_user.id)
@@ -576,6 +624,14 @@ class TelegramBridge:
             return
         account = await self._need_account(message)
         if account is None:
+            return
+
+        if not account.forum_chat_id:
+            await message.answer(
+                "В плоском режиме отдельную тему для нового чата не создать: "
+                "напиши человеку прямо в приложении MAX, и его ответ прилетит "
+                "сюда лентой. Отдельные темы с /write — в Premium: /premium"
+            )
             return
 
         query = _command_arg(message.text)
@@ -771,6 +827,12 @@ class TelegramBridge:
         if chat is None:
             await message.reply("Не знаю, в какой чат MAX это отправить.")
             return
+        await self._forward_media_to_max(message, account, int(chat["max_chat_id"]))
+
+    async def _forward_media_to_max(
+        self, message: Message, account: Account, chat_id: int, *, reply_to: str = ""
+    ) -> None:
+        """Общий путь для медиа из темы и из личной ленты: файл -> в чат MAX."""
         if not account.transport.supports_media:
             await message.reply("Текущий транспорт MAX не умеет отправлять файлы.")
             return
@@ -799,11 +861,12 @@ class TelegramBridge:
 
         try:
             await account.router.send_media_to_max(
-                int(chat["max_chat_id"]),
+                chat_id,
                 data,
                 filename=filename,
                 kind=kind,
                 caption=(message.caption or "").strip(),
+                reply_to=reply_to,
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("файл не ушёл в MAX")
@@ -814,6 +877,64 @@ class TelegramBridge:
             await message.react([ReactionTypeEmoji(emoji="👍")])
         except TelegramBadRequest:
             pass
+
+    # ------------------------------------------------ ответ из плоской ленты
+    def _resolve_by_tg_reply(
+        self, owner_id: int, tg_msg_id: int
+    ) -> tuple[Account, int, str] | None:
+        """По реплаю в личке находит аккаунт, чат MAX и id исходного сообщения.
+
+        Ищем среди всех аккаунтов владельца: у какого в базе есть это
+        tg-сообщение (доставленное из MAX). Так плоский режим работает и когда
+        аккаунтов несколько.
+        """
+        for account in self.accounts.owned_by(owner_id):
+            row = account.storage.max_msg_by_tg(tg_msg_id)
+            if row is not None:
+                return account, int(row["max_chat_id"]), str(row["max_msg_id"])
+        return None
+
+    async def _on_private_reply(self, message: Message) -> None:
+        if not await self._guard(message):
+            return
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return
+        found = self._resolve_by_tg_reply(
+            message.from_user.id, message.reply_to_message.message_id
+        )
+        if found is None:
+            await message.reply(
+                "Не понял, какому чату MAX это адресовано. Ответь реплаем на "
+                "конкретное сообщение из ленты."
+            )
+            return
+        account, chat_id, reply_to = found
+        try:
+            await account.router.send_to_max(chat_id, text, reply_to=reply_to)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("не смог отправить в MAX из личной ленты")
+            await message.reply(f"Не ушло: {exc}")
+            return
+        try:
+            await message.react([ReactionTypeEmoji(emoji="👍")])
+        except TelegramBadRequest:
+            pass
+
+    async def _on_private_media(self, message: Message) -> None:
+        if not await self._guard(message):
+            return
+        found = self._resolve_by_tg_reply(
+            message.from_user.id, message.reply_to_message.message_id
+        )
+        if found is None:
+            await message.reply(
+                "Не понял, какому чату MAX это адресовано. Ответь реплаем на "
+                "конкретное сообщение из ленты."
+            )
+            return
+        account, chat_id, reply_to = found
+        await self._forward_media_to_max(message, account, chat_id, reply_to=reply_to)
 
     # ---------------------------------------------------------- кнопки
     async def _on_callback(self, query: CallbackQuery) -> None:
