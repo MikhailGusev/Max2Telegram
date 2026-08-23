@@ -273,6 +273,35 @@ def test_write_empty_query_finds_nothing() -> None:
     assert transport.find_chats("") == []
 
 
+def test_write_exact_name_beats_substrings() -> None:
+    """«Аня» не должна тонуть среди «Ваня», «Туманян», «Таня» — берём точное."""
+    from maxbridge.transports.userbot import UserbotTransport
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client.me_id = 100
+    transport._absorb_directory(
+        {
+            "contacts": [
+                {"id": 200, "names": [{"name": "Аня"}]},
+                {"id": 201, "names": [{"name": "Ваня Потапов"}]},
+                {"id": 202, "names": [{"name": "Вася Туманян"}]},
+                {"id": 203, "names": [{"name": "Аня Бухмиллер"}]},
+                {"id": 204, "names": [{"name": "Таня Лебедева"}]},
+            ],
+            "chats": [
+                {"id": -200, "type": "DIALOG", "participants": {"100": 1, "200": 1}},
+                {"id": -201, "type": "DIALOG", "participants": {"100": 1, "201": 1}},
+                {"id": -202, "type": "DIALOG", "participants": {"100": 1, "202": 1}},
+                {"id": -203, "type": "DIALOG", "participants": {"100": 1, "203": 1}},
+                {"id": -204, "type": "DIALOG", "participants": {"100": 1, "204": 1}},
+            ],
+        }
+    )
+    assert transport.find_chats("Аня") == [(-200, "Аня")], "точное имя — один вариант"
+    # а по началу слова находим обе Ани, но не «Ваня»/«Туманян»
+    assert {cid for cid, _ in transport.find_chats("Ан")} == {-200, -203}
+
+
 def test_command_arg_survives_mobile_nbsp() -> None:
     """Мобильный Telegram вставляет неразрывный пробел — /write Манечка ломался."""
     from maxbridge.telegram.bridge import _command_arg

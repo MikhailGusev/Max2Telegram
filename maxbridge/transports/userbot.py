@@ -164,36 +164,67 @@ class UserbotTransport(MaxTransport):
     def chat_title(self, chat_id: int) -> str:
         return self._titles.get(chat_id, "")
 
+    @staticmethod
+    def _match_tier(name: str, q: str) -> int:
+        """Насколько хорошо имя совпадает с запросом. Меньше — точнее.
+
+        0 — имя точно равно запросу («Аня» == «Аня»);
+        1 — запрос начинает имя или одно из слов («Аня» → «Аня Бухмиллер»);
+        2 — запрос где-то внутри («аня» → «Ваня», «Туманян»);
+        3 — не совпало.
+        Так точное имя не тонет среди случайных подстрок, и /write может
+        выбрать одного человека вместо бесконечного «уточни».
+        """
+        name = name.casefold()
+        if name == q:
+            return 0
+        if name.startswith(q) or any(word.startswith(q) for word in name.split()):
+            return 1
+        if q in name:
+            return 2
+        return 3
+
     def find_chats(self, query: str, limit: int = 10) -> list[tuple[int, str]]:
         """Поиск по синхронизированному при входе списку чатов и по контактам.
 
-        Сначала ищем среди названий чатов (групп и диалогов), затем — по именам
-        контактов: у контакта id совпадает с chat_id личного диалога в MAX.
+        Ищем среди названий чатов (групп и диалогов) и по именам контактов
+        (у контакта id совпадает с chat_id личного диалога), затем оставляем
+        только совпадения самого точного найденного уровня — см. _match_tier.
         """
         q = query.strip().casefold()
         if not q:
             return []
 
-        found: list[tuple[int, str]] = []
+        # (tier, длина, имя_cf, chat_id, title)
+        candidates: list[tuple[int, int, str, int, str]] = []
         seen: set[int] = set()
+
+        def consider(chat_id: int, title: str) -> None:
+            if not title or chat_id in seen:
+                return
+            tier = self._match_tier(title, q)
+            if tier == 3:
+                return
+            seen.add(chat_id)
+            candidates.append((tier, len(title), title.casefold(), chat_id, title))
+
         for chat_id, title in self._titles.items():
-            if title and q in title.casefold():
-                found.append((chat_id, title))
-                seen.add(chat_id)
+            consider(chat_id, title)
 
         # по имени собеседника: отправлять нужно в ЕГО ДИАЛОГ (chat_id),
         # а не в id контакта — это разные числа, иначе MAX ответит not.found
         for user_id, name in self._names.items():
-            if not name or q not in name.casefold():
-                continue
             dialog_id = self._dialog_by_user.get(user_id)
-            if dialog_id is None or dialog_id in seen:
-                continue
-            found.append((dialog_id, name))
-            seen.add(dialog_id)
+            if dialog_id is not None:
+                consider(dialog_id, name)
 
-        found.sort(key=lambda item: (len(item[1]), item[1].casefold()))
-        return found[:limit]
+        if not candidates:
+            return []
+
+        best = min(item[0] for item in candidates)
+        top = [item for item in candidates if item[0] == best]
+        top.sort(key=lambda item: (item[1], item[2]))
+        return [(chat_id, title) for _, _, _, chat_id, title in top][:limit]
 
     # --------------------------------------------------------------- события
     async def _on_packet(self, packet: dict[str, Any]) -> None:
