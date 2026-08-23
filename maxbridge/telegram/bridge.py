@@ -377,6 +377,8 @@ class TelegramBridge:
         dp.message.register(self._cmd_license, Command("license"))
         dp.message.register(self._cmd_premium, Command("premium"))
         dp.message.register(self._cmd_grant, Command("grant"))
+        dp.message.register(self._cmd_clients, Command("clients"))
+        dp.message.register(self._cmd_registration, Command("registration"))
         dp.message.register(self._cmd_help, Command("help"))
         dp.message.register(self._on_topic_reply, F.message_thread_id.is_not(None), F.text)
         dp.message.register(
@@ -436,11 +438,33 @@ class TelegramBridge:
         await self._begin_onboarding(message)
 
     # ----------------------------------------------------- SaaS-онбординг
+    def _is_server_owner(self, user_id: int | None) -> bool:
+        """Владелец всей установки (не путать с клиентом, который владеет только
+        своим аккаунтом). Только ему доступна owner-панель."""
+        return user_id is not None and user_id == self.config.owner_id
+
+    def _owner_storage(self) -> Any:
+        """База аккаунта владельца сервера — в ней держим рантайм-настройки."""
+        for account in self.accounts:
+            if account.owner_id == self.config.owner_id:
+                return account.storage
+        return None
+
+    def _registration_enabled(self) -> bool:
+        """Тумблер приёма клиентов: рантайм-override из БД важнее флага .env."""
+        enabled = self.config.onboarding_enabled
+        storage = self._owner_storage()
+        if storage is not None:
+            override = storage.get("onboarding_enabled", "")
+            if override != "":
+                enabled = override == "1"
+        return enabled
+
     def _onboarding_open(self) -> tuple[bool, str]:
         """Можно ли принять нового клиента прямо сейчас."""
         if self.clients is None or self.spin_up is None:
             return False, "приём новых клиентов не настроен"
-        if not self.config.onboarding_enabled:
+        if not self._registration_enabled():
             return False, "регистрация сейчас закрыта — напиши владельцу"
         cap = self.config.max_clients
         if cap and self.clients.count_active() >= cap:
@@ -543,6 +567,14 @@ class TelegramBridge:
         if not await self._guard(message):
             return
         extra = "/accounts — список аккаунтов MAX\n" if self.accounts.multi else ""
+        owner = ""
+        if self._is_server_owner(message.from_user.id):
+            owner = (
+                "\n\n<b>Владельцу сервера</b>\n"
+                "/clients — клиенты и статистика\n"
+                "/registration on|off — приём новых клиентов\n"
+                "/grant &lt;user_id&gt; &lt;дней&gt; — выдать Premium"
+            )
         await message.answer(
             "<b>Что умею</b>\n"
             "/bind — привязать эту группу-форум как приёмник\n"
@@ -557,7 +589,8 @@ class TelegramBridge:
             "/rules, /rmrule N — список и удаление правил\n"
             "/autoreply текст — автоответ в текущей теме\n"
             "/premium — оформить подписку\n"
-            "/license — что включено в этой установке",
+            "/license — что включено в этой установке"
+            f"{owner}",
             parse_mode="HTML",
         )
 
@@ -703,8 +736,11 @@ class TelegramBridge:
             )
 
     async def _cmd_grant(self, message: Message) -> None:
-        """Только владелец: выдать Premium другу. /grant <user_id> <дней>."""
+        """Только владелец сервера: выдать Premium. /grant <user_id> <дней>."""
         if not await self._guard(message):
+            return
+        if not self._is_server_owner(message.from_user.id):
+            await message.answer("Эта команда — только для владельца сервера.")
             return
         if self.billing is None:
             await message.answer("Биллинг выключен.")
@@ -733,6 +769,57 @@ class TelegramBridge:
             )
         except TelegramBadRequest:
             pass  # друг ещё не писал боту — узнает сам через /status
+
+    # ------------------------------------------------------ owner-панель SaaS
+    async def _cmd_registration(self, message: Message) -> None:
+        """Владельцу сервера: включить/выключить приём новых клиентов."""
+        if not self._is_server_owner(message.from_user.id):
+            return
+        arg = _command_arg(message.text).strip().lower()
+        if arg not in {"on", "off", "вкл", "выкл"}:
+            state = "включена" if self._registration_enabled() else "выключена"
+            await message.answer(
+                f"Регистрация клиентов сейчас {state}.\n"
+                "Переключить: /registration on | off"
+            )
+            return
+        storage = self._owner_storage()
+        turn_on = arg in {"on", "вкл"}
+        if storage is not None:
+            storage.set("onboarding_enabled", "1" if turn_on else "0")
+        await message.answer(
+            "Регистрация клиентов включена — новые /start принимаются."
+            if turn_on
+            else "Регистрация клиентов выключена — новых не пускаю."
+        )
+
+    async def _cmd_clients(self, message: Message) -> None:
+        """Владельцу сервера: список клиентов и статистика."""
+        if not self._is_server_owner(message.from_user.id):
+            return
+        if self.clients is None:
+            await message.answer("Онбординг клиентов не настроен.")
+            return
+        cap = self.config.max_clients
+        limit = f" / {cap}" if cap else ""
+        state = "включена" if self._registration_enabled() else "выключена"
+        head = (
+            f"<b>Клиенты сервера</b>\n"
+            f"Активных: {self.clients.count_active()}{limit}\n"
+            f"Регистрация: {state}\n"
+        )
+        records = self.clients.all()
+        if not records:
+            await message.answer(head + "\nПока никто не подключился.", parse_mode="HTML")
+            return
+        lines = []
+        for record in records:
+            account = self.accounts.by_name(record.name)
+            msgs = account.storage.stats()["messages"] if account is not None else 0
+            lines.append(
+                f"• <code>{record.tg_user_id}</code> — {record.status}, сообщений {msgs}"
+            )
+        await message.answer(head + "\n" + "\n".join(lines), parse_mode="HTML")
 
     async def _cmd_chats(self, message: Message) -> None:
         if not await self._guard(message):
