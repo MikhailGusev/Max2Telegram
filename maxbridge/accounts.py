@@ -107,6 +107,12 @@ class AccountRegistry:
     def by_forum(self, chat_id: int) -> Account | None:
         return self._by_forum.get(chat_id)
 
+    def add(self, account: Account) -> None:
+        """Добавляет аккаунт в рантайме (SaaS-клиент после онбординга)."""
+        self.accounts.append(account)
+        if account.forum_chat_id:
+            self._by_forum[account.forum_chat_id] = account
+
     def rebind(self, account: Account, chat_id: int) -> None:
         """Перепривязка группы командой /bind."""
         self._by_forum.pop(account.forum_chat_id, None)

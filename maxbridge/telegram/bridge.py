@@ -101,10 +101,24 @@ class TelegramBridge:
         self.bot = Bot(token=config.telegram_token, session=session)
         self.dp = Dispatcher()
         self._drafts: dict[tuple[str, int], list[str]] = {}
+        # SaaS-онбординг: заполняется приложением через bind_onboarding(). Пусто —
+        # приёма новых клиентов нет (мост работает только на аккаунтах владельца).
+        self.clients: Any = None
+        self.spin_up: Any = None
+        self._onboarding: dict[int, Any] = {}  # tg_user_id -> активная попытка QR
         self._register()
 
         for account in self.accounts:
             account.router.attach_telegram(AccountSink(self, account))
+
+    def attach_account(self, account: Account) -> None:
+        """Подключает роутер аккаунта к боту (используется при подъёме клиента)."""
+        account.router.attach_telegram(AccountSink(self, account))
+
+    def bind_onboarding(self, clients: Any, spin_up: Any) -> None:
+        """Даёт боту хранилище клиентов и функцию подъёма аккаунта клиента."""
+        self.clients = clients
+        self.spin_up = spin_up
 
     # ------------------------------------------------------------- доставка
     async def deliver(

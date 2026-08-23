@@ -99,6 +99,13 @@ class Config:
     asr_model: str
     asr_lang: str
 
+    # --- SaaS-онбординг клиентов через QR в боте ---
+    #: принимать ли новых клиентов по /start (по умолчанию выкл — чтобы бот не
+    #: начал поднимать чужие userbot-сессии с IP сервера без ведома владельца)
+    onboarding_enabled: bool = False
+    #: потолок активных клиентов на сервер (0 = без лимита). Митигация бана по IP.
+    max_clients: int = 0
+
     #: явный путь к сессии MAX. Пусто -> рядом с базой. Мультиаккаунт задаёт
     #: своё значение каждому аккаунту, иначе они затрут сессии друг друга.
     session_file: str = ""
@@ -156,6 +163,8 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         db_path=Path(os.getenv("DB_PATH", "data/maxbridge.db")),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         license_key=os.getenv("MAXBRIDGE_LICENSE_KEY", "").strip(),
+        onboarding_enabled=_bool("ONBOARDING_ENABLED", False),
+        max_clients=_int("MAX_CLIENTS", 0),
         free_ai_per_day=_int("FREE_AI_PER_DAY", 3),
         premium_price=_int("PREMIUM_PRICE", 500),
         yoomoney_wallet=os.getenv("YOOMONEY_WALLET", "").strip(),

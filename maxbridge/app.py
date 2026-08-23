@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from typing import Any
 
 from .accounts import Account, AccountRegistry, build_accounts
 from .channels import build_billing, build_channels, build_inbound
+from .clients import CLIENTS_FILE, ClientStore, client_name
 from .config import Config, load_config
 from .core.ai import AiAssistant
 from .core.digest import digest_scheduler
@@ -49,17 +51,71 @@ class Application:
         # каналы эскалации общие: незачем держать по подключению на аккаунт
         self.channels = build_channels(config)
         for account in self.accounts:
-            account.attach_escalator(
-                Escalator(
-                    account.storage,
-                    self.channels,
-                    self.license,
-                    after_minutes=account.config.escalate_after_minutes,
-                    enabled_channels=account.config.escalate_channels,
-                )
-            )
+            account.attach_escalator(self._build_escalator(account))
+
+        # supervisor рантайм-задач: заполняется в run(), нужен для подъёма
+        # клиентских аккаунтов на лету (после онбординга по QR)
+        self._tasks: set[asyncio.Task[None]] | None = None
+        self._wake = asyncio.Event()
+
+        # SaaS-клиенты, прошедшие онбординг: поднимаем их сохранённые аккаунты
+        self.clients = ClientStore(config.db_path.parent / CLIENTS_FILE)
+        for record in self.clients.active():
+            try:
+                self.spin_up_client(record.tg_user_id, launch=False)
+            except Exception:  # noqa: BLE001 - один битый клиент не валит старт
+                log.exception("не смог поднять клиента «%s» на старте", record.name)
+
+        # даём боту доступ к онбордингу: приём новых клиентов и подъём аккаунта
+        self.telegram.bind_onboarding(self.clients, self.spin_up_client)
 
         self.wa_webhook = self._build_webhook()
+
+    def _build_escalator(self, account: Account) -> Escalator:
+        return Escalator(
+            account.storage,
+            self.channels,
+            self.license,
+            after_minutes=account.config.escalate_after_minutes,
+            enabled_channels=account.config.escalate_channels,
+        )
+
+    # --------------------------------------------------- SaaS-клиенты (рантайм)
+    def build_client_account(self, tg_user_id: int) -> Account:
+        """Собирает изолированный аккаунт клиента поверх базового конфига.
+
+        Клиент всегда userbot (вошёл по QR) и всегда в плоском режиме (личка,
+        без форум-группы). Своя база и сессия по имени client-<id>.
+        """
+        name = client_name(tg_user_id)
+        data_dir = self.config.db_path.parent
+        cfg = dataclasses.replace(
+            self.config,
+            owner_id=int(tg_user_id),
+            forum_chat_id=0,
+            max_mode="userbot",
+            db_path=data_dir / f"{name}.db",
+            session_file=str(data_dir / f"{name}_session.json"),
+        )
+        account = Account(name, cfg, self.ai)
+        account.router.attach_billing(self.billing)
+        account.attach_escalator(self._build_escalator(account))
+        return account
+
+    def spin_up_client(self, tg_user_id: int, *, launch: bool = True) -> Account:
+        """Поднимает аккаунт клиента: регистрирует в реестре и (если запущены)
+        стартует его задачи, будя supervisor в run()."""
+        existing = self.accounts.by_name(client_name(tg_user_id))
+        if existing is not None:
+            return existing
+        account = self.build_client_account(tg_user_id)
+        self.accounts.add(account)
+        self.telegram.attach_account(account)
+        if launch and self._tasks is not None:
+            self._tasks.update(self._account_tasks(account))
+            self._wake.set()
+        log.info("клиент «%s» поднят (owner=%s)", account.name, tg_user_id)
+        return account
 
     def _build_webhook(self) -> Any | None:
         """Приём ответов из внешнего канала. Только при лицензии Pro."""
@@ -100,16 +156,35 @@ class Application:
         if self.wa_webhook is not None:
             await self.wa_webhook.start()
 
-        tasks = [asyncio.create_task(self.telegram.run(), name="telegram")]
+        self._tasks = {asyncio.create_task(self.telegram.run(), name="telegram")}
         for account in self.accounts:
-            tasks.extend(self._account_tasks(account))
+            self._tasks.update(self._account_tasks(account))
 
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for task in pending:
-            task.cancel()
-        for task in done:
-            if task.exception() is not None:
-                raise task.exception()  # type: ignore[misc]
+        # supervisor: ждём падения любой задачи, но умеем принять новые задачи
+        # (клиент прошёл онбординг) — их подкидывает spin_up_client через _wake
+        try:
+            while True:
+                waker = asyncio.create_task(self._wake.wait(), name="waker")
+                watched = set(self._tasks) | {waker}
+                done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+
+                if waker in done and not (done - {waker}):
+                    # проснулись только ради новых задач — они уже в self._tasks
+                    self._wake.clear()
+                    continue
+                waker.cancel()
+
+                # какая-то рабочая задача завершилась (обычно это падение)
+                self._tasks -= done
+                for task in done:
+                    if task is not waker and task.exception() is not None:
+                        raise task.exception()  # type: ignore[misc]
+                return
+        finally:
+            for task in self._tasks:
+                if not task.done():
+                    task.cancel()
+            self._tasks = None
 
     def _account_tasks(self, account: Account) -> list[asyncio.Task[None]]:
         async def notify(text: str) -> None:
