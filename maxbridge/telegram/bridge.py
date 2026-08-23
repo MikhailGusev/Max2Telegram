@@ -14,8 +14,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
+import time
+from io import BytesIO
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F
@@ -407,19 +410,134 @@ class TelegramBridge:
         return False
 
     async def _cmd_start(self, message: Message) -> None:
-        if not await self._guard(message):
+        user = message.from_user
+        # уже владелец (в т.ч. подключённый клиент) — обычное приветствие
+        if user is not None and self.accounts.is_owner(user.id):
+            account = self._account_for(message)
+            forum = account is not None and bool(account.forum_chat_id)
+            how = (
+                "Каждый чат MAX появится отдельной темой в группе. "
+                "Отвечай прямо в теме — текст уйдёт в MAX от твоего имени."
+                if forum
+                else "Сообщения из MAX приходят сюда одной лентой. Чтобы ответить — "
+                "сделай реплай на нужное сообщение, и текст уйдёт в MAX от твоего "
+                "имени.\n\nХочешь каждый чат отдельной темой — это Premium: /premium"
+            )
+            await message.answer(f"MaxBridge на связи.\n\n{how}\n\nКоманды: /help")
             return
-        account = self._account_for(message)
-        forum = account is not None and bool(account.forum_chat_id)
-        how = (
-            "Каждый чат MAX появится отдельной темой в группе. "
-            "Отвечай прямо в теме — текст уйдёт в MAX от твоего имени."
-            if forum
-            else "Сообщения из MAX приходят сюда одной лентой. Чтобы ответить — "
-            "сделай реплай на нужное сообщение, и текст уйдёт в MAX от твоего "
-            "имени.\n\nХочешь каждый чат отдельной темой — это Premium: /premium"
+
+        # не владелец: возможно, новый клиент хочет подключиться (только в личке)
+        if message.chat.type != "private":
+            return
+        ok, why = self._onboarding_open()
+        if not ok:
+            await message.answer(f"Этот бот подключает твой MAX к Telegram, но {why}.")
+            return
+        await self._begin_onboarding(message)
+
+    # ----------------------------------------------------- SaaS-онбординг
+    def _onboarding_open(self) -> tuple[bool, str]:
+        """Можно ли принять нового клиента прямо сейчас."""
+        if self.clients is None or self.spin_up is None:
+            return False, "приём новых клиентов не настроен"
+        if not self.config.onboarding_enabled:
+            return False, "регистрация сейчас закрыта — напиши владельцу"
+        cap = self.config.max_clients
+        if cap and self.clients.count_active() >= cap:
+            return False, "сервер сейчас заполнен, попробуй позже"
+        return True, ""
+
+    @staticmethod
+    def _qr_png(link: str) -> bytes:
+        import qrcode
+        from qrcode.image.pure import PyPNGImage  # чистый PNG без Pillow
+
+        buffer = BytesIO()
+        qrcode.make(link, image_factory=PyPNGImage).save(buffer)
+        return buffer.getvalue()
+
+    async def _begin_onboarding(self, message: Message) -> None:
+        from ..clients import client_name
+
+        user_id = message.from_user.id
+        if user_id in self._onboarding and not self._onboarding[user_id].done():
+            await message.answer(
+                "Ты уже подключаешься — отсканируй QR выше. Если код устарел, "
+                "пришли /start ещё раз через минуту."
+            )
+            return
+
+        session_path = self.config.db_path.parent / f"{client_name(user_id)}_session.json"
+        self.clients.start_onboarding(user_id, str(session_path))
+        await message.answer("Подключаю твой MAX. Сейчас пришлю QR-код для входа…")
+        self._onboarding[user_id] = asyncio.create_task(
+            self._run_onboarding(user_id, message.chat.id, session_path),
+            name=f"onboard:{user_id}",
         )
-        await message.answer(f"MaxBridge на связи.\n\n{how}\n\nКоманды: /help")
+
+    async def _run_onboarding(self, user_id: int, chat_id: int, session_path: Any) -> None:
+        """Показывает QR, ждёт скан, сохраняет сессию и поднимает аккаунт клиента."""
+        from ..clients import STATUS_ACTIVE
+        from ..maxproto import MaxAuthError, MaxWSClient
+
+        client = MaxWSClient(session_path)
+        try:
+            await client.connect()
+            qr = await client.request_qr()
+            try:
+                png = self._qr_png(str(qr.get("qrLink") or ""))
+            except ImportError:
+                await self.bot.send_message(
+                    chat_id, "На сервере не установлен пакет qrcode — сообщи владельцу."
+                )
+                return
+            await self.bot.send_photo(
+                chat_id,
+                BufferedInputFile(png, filename="max-qr.png"),
+                caption=(
+                    "Открой приложение MAX → Настройки → Устройства → "
+                    "Подключить устройство и наведи камеру на этот код.\n"
+                    "Жду подтверждения…"
+                ),
+            )
+            interval = max(1.0, float(qr.get("pollingInterval") or 2000) / 1000.0)
+            expires_at = float(qr.get("expiresAt") or 0)
+            timeout = (expires_at / 1000.0 - time.time()) if expires_at else 180.0
+            await client.poll_qr(qr["trackId"], interval=interval, timeout=timeout)
+            await client.login_by_qr(qr["trackId"])
+        except MaxAuthError as exc:
+            await self.bot.send_message(
+                chat_id, f"Не получилось войти: {exc}\nПопробуй заново: /start"
+            )
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("онбординг клиента %s сорвался", user_id)
+            await self.bot.send_message(
+                chat_id, "Что-то пошло не так при подключении. Попробуй позже: /start"
+            )
+            return
+        finally:
+            await client.close()
+            self._onboarding.pop(user_id, None)
+
+        # сессия сохранена — поднимаем изолированный аккаунт клиента в рантайме
+        try:
+            self.clients.set_status(user_id, STATUS_ACTIVE)
+            self.spin_up(user_id)
+        except Exception:  # noqa: BLE001
+            log.exception("не смог поднять аккаунт клиента %s после входа", user_id)
+            await self.bot.send_message(
+                chat_id, "Вошёл, но не смог запустить мост. Напиши владельцу."
+            )
+            return
+
+        await self.bot.send_message(
+            chat_id,
+            "🎉 Готово! Твой MAX подключён.\n\n"
+            "Входящие сообщения будут приходить сюда одной лентой. Чтобы "
+            "ответить — сделай реплай на нужное сообщение, и текст уйдёт в MAX "
+            "от твоего имени.\n\nКоманды: /help",
+        )
 
     async def _cmd_help(self, message: Message) -> None:
         if not await self._guard(message):
