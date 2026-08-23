@@ -160,31 +160,41 @@ class Application:
         for account in self.accounts:
             self._tasks.update(self._account_tasks(account))
 
-        # supervisor: ждём падения любой задачи, но умеем принять новые задачи
-        # (клиент прошёл онбординг) — их подкидывает spin_up_client через _wake
         try:
-            while True:
-                waker = asyncio.create_task(self._wake.wait(), name="waker")
-                watched = set(self._tasks) | {waker}
-                done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
-
-                if waker in done and not (done - {waker}):
-                    # проснулись только ради новых задач — они уже в self._tasks
-                    self._wake.clear()
-                    continue
-                waker.cancel()
-
-                # какая-то рабочая задача завершилась (обычно это падение)
-                self._tasks -= done
-                for task in done:
-                    if task is not waker and task.exception() is not None:
-                        raise task.exception()  # type: ignore[misc]
-                return
+            await self._supervise()
         finally:
-            for task in self._tasks:
+            for task in self._tasks or ():
                 if not task.done():
                     task.cancel()
             self._tasks = None
+
+    async def _supervise(self) -> None:
+        """Держит приложение живым, пока задачи работают.
+
+        Роняем всё только если задача упала с ИСКЛЮЧЕНИЕМ. Штатно завершившуюся
+        задачу (например, выключенную эскалацию, которая сразу возвращается)
+        просто убираем из набора и живём дальше — иначе один такой возврат ронял
+        бы весь сервис в цикл рестартов. `_wake` будит цикл, когда клиент прошёл
+        онбординг и его задачи добавлены в self._tasks на лету (spin_up_client).
+        """
+        assert self._tasks is not None
+        while self._tasks:
+            waker = asyncio.create_task(self._wake.wait(), name="waker")
+            watched = set(self._tasks) | {waker}
+            done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+
+            self._wake.clear()
+            if waker not in done:
+                waker.cancel()
+
+            for task in done:
+                if task is waker:
+                    continue
+                self._tasks.discard(task)
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
+            # continue: подхватываем добавленные на лету задачи и ждём дальше
 
     def _account_tasks(self, account: Account) -> list[asyncio.Task[None]]:
         async def notify(text: str) -> None:
