@@ -1,6 +1,7 @@
 """Разовый вход в аккаунт MAX по SMS-коду.
 
     python -m maxbridge login                 один аккаунт из .env
+    python -m maxbridge login --qr            вход по QR-коду (обходит SMS/капчу)
     python -m maxbridge login --token         вход готовым токеном из браузера
     python -m maxbridge login --verify        проверить, жива ли сессия
     python -m maxbridge login --account work  конкретный аккаунт из accounts.json
@@ -149,10 +150,90 @@ async def _login_by_token(name: str, config: Config) -> int:
     return 0
 
 
+def _render_qr(link: str) -> None:
+    """Печатает QR-код строкой прямо в консоль."""
+    import qrcode
+
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(link)
+    qr.make(fit=True)
+    qr.print_ascii(invert=True)
+
+
+async def _login_by_qr(name: str, config: Config) -> int:
+    """Вход по QR-коду: показываем код, ждём скан в приложении MAX.
+
+    Обходит и SMS, и капчу — MAX выдаёт токен сразу после подтверждения на
+    телефоне (Настройки -> Устройства -> Подключить устройство).
+    """
+    client = MaxWSClient(config.session_path)
+    if client.has_session:
+        answer = input(
+            f"У «{name}» уже есть сессия ({config.session_path}). Перелогиниться? [y/N]: "
+        ).strip().lower()
+        if answer not in {"y", "yes", "д", "да"}:
+            print("Оставляю как есть.")
+            return 0
+
+    try:
+        await client.connect()
+        print("Запрашиваю QR-код…")
+        qr = await client.request_qr()
+    except MaxAuthError as exc:
+        print(f"Не вышло: {exc}")
+        await client.close()
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"Ошибка соединения с MAX: {exc}")
+        await client.close()
+        return 1
+
+    try:
+        _render_qr(str(qr.get("qrLink") or ""))
+    except ImportError:
+        print("\nНужен пакет qrcode: pip install qrcode")
+        await client.close()
+        return 1
+
+    print("\nОткрой в приложении MAX: Настройки -> Устройства ->")
+    print("Подключить устройство — и наведи камеру на код выше.")
+    print("Жду подтверждения…\n")
+
+    import time
+
+    interval = max(0.5, float(qr.get("pollingInterval") or 2000) / 1000.0)
+    expires_at = float(qr.get("expiresAt") or 0)
+    timeout = (expires_at / 1000.0 - time.time()) if expires_at else 180.0
+
+    try:
+        await client.poll_qr(qr["trackId"], interval=interval, timeout=timeout)
+        payload = await client.login_by_qr(qr["trackId"])
+    except MaxAuthError as exc:
+        print(f"Не вышло: {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"Ошибка при завершении входа: {exc}")
+        return 1
+    finally:
+        await client.close()
+
+    contact = (payload.get("profile") or {}).get("contact") or {}
+    who = contact.get("phone") or contact.get("name") or "аккаунт"
+    print(f"\nГотово: вошёл как {who}")
+    print(f"Сессия: {config.session_path}")
+    print("Запускай мост: python -m maxbridge")
+    return 0
+
+
 async def login_flow(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="maxbridge login", description="Вход в аккаунт MAX")
     parser.add_argument("--account", help="имя аккаунта из accounts.json")
     parser.add_argument("--list", action="store_true", help="показать аккаунты и их сессии")
+    parser.add_argument(
+        "--qr",
+        action="store_true",
+        help="вход по QR-коду (обходит SMS и капчу; проще всего)",
+    )
     parser.add_argument(
         "--token",
         action="store_true",
@@ -200,6 +281,9 @@ async def login_flow(argv: list[str] | None = None) -> int:
         print(f"Сессия «{name}» жива: {contact.get('phone') or 'аккаунт'}, "
               f"чатов {len(payload.get('chats') or [])}")
         return 0
+
+    if args.qr:
+        return await _login_by_qr(name, config)
 
     if args.token:
         return await _login_by_token(name, config)

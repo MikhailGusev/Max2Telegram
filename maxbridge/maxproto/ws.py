@@ -271,6 +271,75 @@ class MaxWSClient:
         self._start_keepalive()
         return payload
 
+    # -------------------------------------------------------------- QR-вход
+    async def request_qr(self) -> dict[str, Any]:
+        """Запрашивает QR для входа в MAX (обходит SMS и капчу).
+
+        Возвращает payload с полями `qrLink` (строка, которую надо превратить в
+        QR-картинку), `trackId` (идентификатор попытки для опроса и финала),
+        `pollingInterval` (мс между опросами) и `expiresAt` (когда QR протухнет).
+        Требует свежее `_hello()` с deviceType=WEB — его и делаем здесь.
+        """
+        await self._hello()
+        response = await self.invoke(Op.GET_QR, {})
+        payload = response.get("payload") or {}
+        if not payload.get("trackId") or not payload.get("qrLink"):
+            raise MaxAuthError("MAX не выдал QR — попробуй ещё раз позже")
+        return payload
+
+    async def qr_status(self, track_id: str) -> dict[str, Any]:
+        """Один опрос статуса QR. Возвращает {loginAvailable, expiresAt, ...}."""
+        response = await self.invoke(Op.GET_QR_STATUS, {"trackId": str(track_id)})
+        payload = response.get("payload") or {}
+        return payload.get("status") or payload
+
+    async def poll_qr(
+        self,
+        track_id: str,
+        *,
+        interval: float = 1.0,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        """Ждёт, пока владелец отсканирует QR в приложении MAX.
+
+        Опрашивает `qr_status` каждые `interval` секунд, пока не увидит
+        `loginAvailable == true`. Бросает MaxAuthError по истечении `timeout`
+        (QR протух — нужно запросить новый).
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            status = await self.qr_status(track_id)
+            if status.get("loginAvailable"):
+                return status
+            if loop.time() >= deadline:
+                raise MaxAuthError("QR истёк — запроси новый код")
+            await asyncio.sleep(max(0.5, interval))
+
+    async def login_by_qr(self, track_id: str) -> dict[str, Any]:
+        """Финализирует QR-вход: забирает LOGIN-токен и сохраняет сессию."""
+        response = await self.invoke(Op.LOGIN_BY_QR, {"trackId": str(track_id)})
+        payload = response.get("payload") or {}
+        if payload.get("passwordChallenge") and not (
+            payload.get("tokenAttrs") or {}
+        ).get("LOGIN"):
+            raise MaxAuthError(
+                "на аккаунте включён пароль (2FA) — QR-вход требует его ввода, "
+                "пока не поддерживается; войди токеном из браузера"
+            )
+        try:
+            self._token = payload["tokenAttrs"]["LOGIN"]["token"]
+        except (KeyError, TypeError) as exc:
+            raise MaxAuthError(
+                "в ответе MAX нет LOGIN-токена после сканирования QR"
+            ) from exc
+
+        self._remember_profile(payload)
+        self._logged_in = True
+        self._save_session()
+        self._start_keepalive()
+        return payload
+
     async def login(self) -> dict[str, Any]:
         """Вход по сохранённой сессии. Возвращает payload синхронизации (в нём чаты)."""
         if not self._load_session():

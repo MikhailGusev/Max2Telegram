@@ -23,6 +23,9 @@ class Op(IntEnum):
     START_AUTH = 17          # запрос SMS-кода по номеру телефона
     CHECK_CODE = 18          # подтверждение кода -> выдаёт LOGIN-токен
     LOGIN_BY_TOKEN = 19      # вход по сохранённому токену + синхронизация чатов
+    GET_QR = 288             # запрос QR: {} -> {qrLink, trackId, expiresAt, pollingInterval}
+    GET_QR_STATUS = 289      # опрос:  {trackId} -> {status:{loginAvailable, expiresAt}}
+    LOGIN_BY_QR = 291        # финал:  {trackId} -> {tokenAttrs:{LOGIN:{token}}}
 
     # --- пользователи и контакты ---
     RESOLVE_USERS = 32
