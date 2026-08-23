@@ -870,18 +870,29 @@ class TelegramBridge:
             return
 
         if len(matches) > 1:
-            lines = "\n".join(f"• {html.escape(title)}" for _, title in matches)
+            # даём кнопки выбора — раньше бот просто печатал список и замолкал
+            buttons = [
+                [InlineKeyboardButton(text=title, callback_data=f"write:{chat_id}")]
+                for chat_id, title in matches
+            ]
             await message.answer(
-                f"Нашёл несколько — уточни имя, чтобы остался один вариант:\n{lines}"
+                f"Нашёл несколько на «{html.escape(query)}» — выбери, кому написать:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
             )
             return
 
         chat_id, title = matches[0]
+        await self._open_write_topic(account, chat_id, title, notify=message.answer)
+
+    async def _open_write_topic(
+        self, account: Account, chat_id: int, title: str, *, notify: Any
+    ) -> None:
+        """Открывает тему для чата MAX и зовёт писать. `notify` — куда ответить."""
         try:
             topic_id = await self._ensure_topic_by(account, chat_id, title, "dialog")
         except Exception as exc:  # noqa: BLE001
             log.exception("не смог создать тему для /write")
-            await message.answer(f"Не смог открыть тему: {exc}")
+            await notify(f"Не смог открыть тему: {exc}")
             return
 
         await self.bot.send_message(
@@ -893,7 +904,7 @@ class TelegramBridge:
             ),
             parse_mode="HTML",
         )
-        await message.answer(f"Готово: тема «{title}» создана.")
+        await notify(f"Готово: тема «{title}» создана.")
 
     async def _cmd_find(self, message: Message) -> None:
         if not await self._guard(message):
@@ -1184,8 +1195,32 @@ class TelegramBridge:
             await self._make_drafts(query, account, int(rest))
         elif action == "send":
             await self._send_draft(query, account, rest)
+        elif action == "write":
+            await self._write_from_callback(query, account, rest)
         else:
             await query.answer()
+
+    async def _write_from_callback(
+        self, query: CallbackQuery, account: Account, rest: str
+    ) -> None:
+        """Кнопка выбора из /write: открывает тему для выбранного контакта."""
+        if not account.forum_chat_id:
+            await query.answer("Нужна привязанная группа-форум", show_alert=True)
+            return
+        try:
+            chat_id = int(rest)
+        except ValueError:
+            await query.answer("Не понял выбор", show_alert=True)
+            return
+        title = account.transport.chat_title(chat_id) or f"MAX {chat_id}"
+        await self._open_write_topic(
+            account, chat_id, title, notify=lambda text: query.answer(text)
+        )
+        if query.message is not None:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except TelegramBadRequest:
+                pass
 
     async def _make_drafts(self, query: CallbackQuery, account: Account, chat_id: int) -> None:
         # черновики — AI-действие: списываем бесплатное (у premium безлимит)
