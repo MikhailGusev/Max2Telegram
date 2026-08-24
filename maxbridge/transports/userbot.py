@@ -50,6 +50,9 @@ class UserbotTransport(MaxTransport):
         self._dialog_by_user: dict[int, int] = {}
         self._task: asyncio.Task[None] | None = None
         self._resolving: set[int] = set()
+        #: id, чьё имя MAX так и не отдал — не долбим повторно каждое сообщение
+        self._unresolvable: set[int] = set()
+        self._resolve_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -140,13 +143,36 @@ class UserbotTransport(MaxTransport):
         if name:
             self._names[person_id] = str(name)
 
+    def _schedule_resolve(self, user_id: int) -> None:
+        """Запускает получение имени в фоне — НЕ блокируя приём сообщений.
+
+        Раньше resolve ждали прямо в обработчике пакета, и таймаут opcode 32
+        (MAX не отвечает на посторонних) морозил доставку всех сообщений на 30 с.
+        Теперь сообщение уходит сразу, а имя (если MAX его отдаст) подтянется к
+        следующим сообщениям этого отправителя.
+        """
+        if (
+            not user_id
+            or user_id in self._names
+            or user_id in self._resolving
+            or user_id in self._unresolvable
+        ):
+            return
+        task = asyncio.create_task(self._resolve_user(user_id))
+        self._resolve_tasks.add(task)
+        task.add_done_callback(self._resolve_tasks.discard)
+
     async def _resolve_user(self, user_id: int) -> None:
-        """Подтягивает имя отправителя, если его нет в кэше."""
+        """Подтягивает имя отправителя. Вызывается в фоне через _schedule_resolve."""
         if user_id in self._names or user_id in self._resolving or not user_id:
             return
         self._resolving.add(user_id)
         try:
-            response = await self.client.invoke(Op.RESOLVE_USERS, {"contactIds": [user_id]})
+            # короткий таймаут: MAX на посторонних не отвечает, ждать 30 с незачем
+            response = await asyncio.wait_for(
+                self.client.invoke(Op.RESOLVE_USERS, {"contactIds": [user_id]}),
+                timeout=10,
+            )
             payload = response.get("payload") or {}
             # ответ MAX кладёт людей под разными ключами и то списком, то словарём
             # по id — забираем из всех известных вариантов
@@ -163,10 +189,14 @@ class UserbotTransport(MaxTransport):
                     sample = _first_person(payload.get(key))
                     if sample is not None:
                         log.debug("  %s[0] ключи=%s", key, sorted(sample.keys()))
-        except Exception as exc:  # noqa: BLE001 - имя не критично
+        except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001 - имя не критично
             log.debug("не смог получить имя пользователя %s: %s", user_id, exc)
         finally:
             self._resolving.discard(user_id)
+            if user_id not in self._names:
+                # имя не отдали — помечаем, чтобы не долбить запрос на каждом
+                # следующем сообщении (иначе поток фоновых таймаутов)
+                self._unresolvable.add(user_id)
 
     def chat_title(self, chat_id: int) -> str:
         return self._titles.get(chat_id, "")
@@ -245,7 +275,8 @@ class UserbotTransport(MaxTransport):
 
         sender_id = int(raw.get("sender") or raw.get("senderId") or 0)
         if sender_id and sender_id not in self._names:
-            await self._resolve_user(sender_id)
+            # в фоне: не блокируем доставку ожиданием ответа MAX (см. issue с 30 с)
+            self._schedule_resolve(sender_id)
 
         sender_name = self._names.get(sender_id, "")
         if not sender_name and sender_id != self.client.me_id:

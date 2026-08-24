@@ -52,6 +52,28 @@ async def test_resolve_user_reads_nested_contact_name() -> None:
     assert transport._names[42] == "Ольга"
 
 
+async def test_unresolvable_user_not_retried() -> None:
+    """Если MAX не отдал имя (таймаут) — метим и не долбим запрос снова."""
+    import asyncio
+
+    transport = UserbotTransport("не-важно.json")
+    calls = {"n": 0}
+
+    async def fake_invoke(opcode, payload):
+        calls["n"] += 1
+        raise MaxProtocolError("таймаут ответа на opcode 32")
+
+    transport.client.invoke = fake_invoke  # type: ignore[assignment]
+    await transport._resolve_user(999)
+    assert 999 in transport._unresolvable
+    assert calls["n"] == 1
+
+    # повторная попытка запланировать резолв не должна снова звать MAX
+    transport._schedule_resolve(999)
+    await asyncio.sleep(0)
+    assert calls["n"] == 1, "по неотвечающему id повторных запросов нет"
+
+
 async def test_send_retries_after_connection_closed() -> None:
     transport = UserbotTransport("не-важно.json")
     # эмулируем «уже переподключились», чтобы повтор не ждал реально
