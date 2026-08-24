@@ -79,9 +79,8 @@ class UserbotTransport(MaxTransport):
         имени собеседника — без справочника имён получились бы «MAX -70123…».
         """
         for key in ("contacts", "profiles", "users"):
-            for person in payload.get(key) or []:
-                if isinstance(person, dict):
-                    self._remember_person(person)
+            for person in _iter_people(payload.get(key)):
+                self._remember_person(person)
 
         for chat in payload.get("chats") or []:
             if not isinstance(chat, dict):
@@ -131,18 +130,13 @@ class UserbotTransport(MaxTransport):
         return ""
 
     def _remember_person(self, person: dict[str, Any]) -> None:
+        contact = person.get("contact") if isinstance(person.get("contact"), dict) else {}
         person_id = person.get("id")
         if not isinstance(person_id, int):
-            contact = person.get("contact")
-            if isinstance(contact, dict):
-                person_id = contact.get("id")
+            person_id = contact.get("id")
         if not isinstance(person_id, int):
             return
-        name = (
-            person.get("names", [{}])[0].get("name")
-            if isinstance(person.get("names"), list) and person["names"]
-            else None
-        ) or person.get("name") or person.get("firstName") or ""
+        name = _extract_name(person) or _extract_name(contact)
         if name:
             self._names[person_id] = str(name)
 
@@ -154,12 +148,21 @@ class UserbotTransport(MaxTransport):
         try:
             response = await self.client.invoke(Op.RESOLVE_USERS, {"contactIds": [user_id]})
             payload = response.get("payload") or {}
-            # ответ на RESOLVE_USERS кладёт людей под разными ключами в зависимости
-            # от версии — забираем из всех известных, как при синхронизации
+            # ответ MAX кладёт людей под разными ключами и то списком, то словарём
+            # по id — забираем из всех известных вариантов
             for key in ("contacts", "profiles", "users"):
-                for person in payload.get(key) or []:
-                    if isinstance(person, dict):
-                        self._remember_person(person)
+                for person in _iter_people(payload.get(key)):
+                    self._remember_person(person)
+            if user_id not in self._names:
+                # имя не нашлось — покажем форму ответа (только ключи), чтобы
+                # понять, где MAX прячет имя участника группы
+                log.debug(
+                    "RESOLVE_USERS не дал имя %s: ключи ответа=%s", user_id, sorted(payload.keys())
+                )
+                for key in ("contacts", "profiles", "users"):
+                    sample = _first_person(payload.get(key))
+                    if sample is not None:
+                        log.debug("  %s[0] ключи=%s", key, sorted(sample.keys()))
         except Exception as exc:  # noqa: BLE001 - имя не критично
             log.debug("не смог получить имя пользователя %s: %s", user_id, exc)
         finally:
@@ -365,6 +368,36 @@ class UserbotTransport(MaxTransport):
 
     async def react(self, chat_id: int, message_id: str, emoji: str) -> None:
         await self.client.react(chat_id, message_id, emoji)
+
+
+def _iter_people(container: Any):
+    """Перебирает людей в ответе MAX, где это может быть список ИЛИ словарь по id."""
+    if isinstance(container, list):
+        for item in container:
+            if isinstance(item, dict):
+                yield item
+    elif isinstance(container, dict):
+        for item in container.values():
+            if isinstance(item, dict):
+                yield item
+
+
+def _first_person(container: Any) -> dict[str, Any] | None:
+    for item in _iter_people(container):
+        return item
+    return None
+
+
+def _extract_name(data: dict[str, Any]) -> str:
+    """Достаёт отображаемое имя из объекта человека в любом из виденных форматов."""
+    if not isinstance(data, dict):
+        return ""
+    names = data.get("names")
+    if isinstance(names, list) and names and isinstance(names[0], dict):
+        first = names[0].get("name")
+        if first:
+            return str(first)
+    return str(data.get("name") or data.get("firstName") or "")
 
 
 def _default_name(kind: str) -> str:

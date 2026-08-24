@@ -25,6 +25,33 @@ async def test_resolve_user_reads_profiles_key() -> None:
     assert transport._names[500] == "Ирина"
 
 
+async def test_resolve_user_reads_dict_keyed_response() -> None:
+    """MAX часто отдаёт людей словарём по id, а не списком — тоже разбираем."""
+    transport = UserbotTransport("не-важно.json")
+
+    async def fake_invoke(opcode, payload):
+        return {"payload": {"contacts": {"155881724": {"id": 155881724, "name": "Пётр"}}}}
+
+    transport.client.invoke = fake_invoke  # type: ignore[assignment]
+    await transport._resolve_user(155881724)
+    assert transport._names[155881724] == "Пётр"
+
+
+async def test_resolve_user_reads_nested_contact_name() -> None:
+    transport = UserbotTransport("не-важно.json")
+
+    async def fake_invoke(opcode, payload):
+        return {
+            "payload": {
+                "users": [{"contact": {"id": 42, "names": [{"name": "Ольга"}]}}]
+            }
+        }
+
+    transport.client.invoke = fake_invoke  # type: ignore[assignment]
+    await transport._resolve_user(42)
+    assert transport._names[42] == "Ольга"
+
+
 async def test_send_retries_after_connection_closed() -> None:
     transport = UserbotTransport("не-важно.json")
     # эмулируем «уже переподключились», чтобы повтор не ждал реально
