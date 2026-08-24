@@ -174,14 +174,21 @@ class UserbotTransport(MaxTransport):
         task.add_done_callback(self._resolve_tasks.discard)
 
     async def _probe_members(self, chat_id: int) -> None:
-        """ЗОНД: тянет историю группы (безопасный опкод 49) и логирует ФОРМУ
-        ответа — ищем, прикладывает ли MAX профили участников. Ничего не шлёт
+        """ЗОНД: запрашивает список участников группы (опкод 59, только чтение) и
+        логирует ФОРМУ ответа — ищем, где лежат имена участников. Ничего не шлёт
         и не меняет; печатает только имена полей, без текста переписки."""
         try:
-            payload = await asyncio.wait_for(self.client.fetch_history(chat_id, count=1), timeout=10)
+            response = await asyncio.wait_for(
+                self.client.invoke(
+                    Op.GET_MEMBERS,
+                    {"type": "MEMBER", "marker": 0, "chatId": chat_id, "count": 100},
+                ),
+                timeout=10,
+            )
         except Exception as exc:  # noqa: BLE001
             log.debug("ЗОНД участников chat=%s не удался: %s", chat_id, exc)
             return
+        payload = response.get("payload") or {}
         if not isinstance(payload, dict):
             return
         log.debug("ЗОНД участников chat=%s: ключи payload=%s", chat_id, sorted(payload.keys()))

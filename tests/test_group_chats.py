@@ -74,22 +74,26 @@ async def test_unresolvable_user_not_retried() -> None:
     assert calls["n"] == 1, "по неотвечающему id повторных запросов нет"
 
 
-async def test_probe_reads_history_once() -> None:
-    """Зонд участников — только чтение истории, ровно один раз на группу."""
+async def test_probe_reads_members_once() -> None:
+    """Зонд участников — один запрос списка участников (опкод 59) на группу."""
     import asyncio
 
+    from maxbridge.maxproto.opcodes import Op
+
     transport = UserbotTransport("не-важно.json")
-    calls = {"n": 0}
+    calls = {"n": 0, "opcodes": []}
 
-    async def fake_history(chat_id, *, count=30):
+    async def fake_invoke(opcode, payload):
         calls["n"] += 1
-        return {"messages": [{"id": "1"}], "profiles": [{"id": 5, "name": "X"}]}
+        calls["opcodes"].append(int(opcode))
+        return {"payload": {"members": [{"id": 5, "names": [{"name": "X"}]}]}}
 
-    transport.client.fetch_history = fake_history  # type: ignore[assignment]
+    transport.client.invoke = fake_invoke  # type: ignore[assignment]
     transport._schedule_probe(-77)
     transport._schedule_probe(-77)  # повтор — no-op
     await asyncio.sleep(0.05)  # даём фоновой задаче отработать
     assert calls["n"] == 1
+    assert calls["opcodes"] == [int(Op.GET_MEMBERS)]
     assert -77 in transport._probed_chats
 
 

@@ -36,6 +36,7 @@ class Op(IntEnum):
     CHAT_MARK = 50           # READ_MESSAGE / SET_AS_UNREAD
     PIN_MESSAGE = 55
     JOIN_BY_LINK = 57
+    GET_MEMBERS = 59         # список участников: {type:MEMBER, chatId, marker, count}
     LEAVE_CHAT = 75
     CHAT_MEMBERS = 77
 
