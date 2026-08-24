@@ -53,8 +53,8 @@ class UserbotTransport(MaxTransport):
         #: id, чьё имя MAX так и не отдал — не долбим повторно каждое сообщение
         self._unresolvable: set[int] = set()
         self._resolve_tasks: set[asyncio.Task[None]] = set()
-        #: группы, по которым уже снимали диагностический зонд участников
-        self._probed_chats: set[int] = set()
+        #: группы, по которым уже подтянули список участников (имена)
+        self._members_loaded: set[int] = set()
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -164,19 +164,22 @@ class UserbotTransport(MaxTransport):
         self._resolve_tasks.add(task)
         task.add_done_callback(self._resolve_tasks.discard)
 
-    def _schedule_probe(self, chat_id: int) -> None:
-        """Разовый диагностический зонд участников группы (только чтение)."""
-        if chat_id in self._probed_chats:
+    def _schedule_members(self, chat_id: int) -> None:
+        """Один раз на группу подтягивает список участников (для имён)."""
+        if chat_id in self._members_loaded:
             return
-        self._probed_chats.add(chat_id)
-        task = asyncio.create_task(self._probe_members(chat_id))
+        self._members_loaded.add(chat_id)
+        task = asyncio.create_task(self._load_members(chat_id))
         self._resolve_tasks.add(task)
         task.add_done_callback(self._resolve_tasks.discard)
 
-    async def _probe_members(self, chat_id: int) -> None:
-        """ЗОНД: запрашивает список участников группы (опкод 59, только чтение) и
-        логирует ФОРМУ ответа — ищем, где лежат имена участников. Ничего не шлёт
-        и не меняет; печатает только имена полей, без текста переписки."""
+    async def _load_members(self, chat_id: int) -> None:
+        """Забирает участников группы (опкод 59) и запоминает их имена.
+
+        В ответе каждый участник — {contact:{id, names...}, presence, readMark};
+        имя и id достаёт _remember_person из вложенного contact. Так «неизвестный»
+        в группах превращается в реальные имена. Только чтение, ничего не меняет.
+        """
         try:
             response = await asyncio.wait_for(
                 self.client.invoke(
@@ -185,20 +188,21 @@ class UserbotTransport(MaxTransport):
                 ),
                 timeout=10,
             )
-        except Exception as exc:  # noqa: BLE001
-            log.debug("ЗОНД участников chat=%s не удался: %s", chat_id, exc)
+        except Exception as exc:  # noqa: BLE001 - имена не критичны для доставки
+            log.debug("не смог получить участников группы %s: %s", chat_id, exc)
+            self._members_loaded.discard(chat_id)  # дать шанс повторить позже
             return
-        payload = response.get("payload") or {}
-        if not isinstance(payload, dict):
-            return
-        log.debug("ЗОНД участников chat=%s: ключи payload=%s", chat_id, sorted(payload.keys()))
-        for key, value in payload.items():
-            if isinstance(value, list) and value and isinstance(value[0], dict):
-                log.debug("  ЗОНД %s[0] ключи=%s", key, sorted(value[0].keys()))
-            elif isinstance(value, dict) and value:
-                sample = next(iter(value.values()))
-                if isinstance(sample, dict):
-                    log.debug("  ЗОНД %s{...} ключи=%s", key, sorted(sample.keys()))
+        members = (response.get("payload") or {}).get("members") or []
+        before = len(self._names)
+        for member in members:
+            if isinstance(member, dict):
+                self._remember_person(member)
+        log.info(
+            "группа %s: участников %d, новых имён +%d",
+            chat_id,
+            len(members),
+            len(self._names) - before,
+        )
 
     async def _resolve_user(self, user_id: int) -> None:
         """Подтягивает имя отправителя. Вызывается в фоне через _schedule_resolve."""
@@ -313,10 +317,13 @@ class UserbotTransport(MaxTransport):
 
         sender_id = int(raw.get("sender") or raw.get("senderId") or 0)
         if sender_id and sender_id not in self._names:
-            # в фоне: не блокируем доставку ожиданием ответа MAX (см. issue с 30 с)
-            self._schedule_resolve(sender_id)
+            # в группе имена берём из списка участников (опкод 59 — работает),
+            # в личных диалогах — точечным resolve (опкод 32). Оба в фоне, чтобы
+            # не блокировать доставку ожиданием ответа MAX.
             if self._kinds.get(chat_id) == "chat":
-                self._schedule_probe(chat_id)
+                self._schedule_members(chat_id)
+            else:
+                self._schedule_resolve(sender_id)
 
         sender_name = self._names.get(sender_id, "")
         if not sender_name and sender_id != self.client.me_id:

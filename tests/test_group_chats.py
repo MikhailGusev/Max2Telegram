@@ -74,8 +74,8 @@ async def test_unresolvable_user_not_retried() -> None:
     assert calls["n"] == 1, "по неотвечающему id повторных запросов нет"
 
 
-async def test_probe_reads_members_once() -> None:
-    """Зонд участников — один запрос списка участников (опкод 59) на группу."""
+async def test_group_members_fill_names_once() -> None:
+    """Список участников группы (опкод 59) даёт имена: contact.names → _names."""
     import asyncio
 
     from maxbridge.maxproto.opcodes import Op
@@ -86,15 +86,24 @@ async def test_probe_reads_members_once() -> None:
     async def fake_invoke(opcode, payload):
         calls["n"] += 1
         calls["opcodes"].append(int(opcode))
-        return {"payload": {"members": [{"id": 5, "names": [{"name": "X"}]}]}}
+        return {
+            "payload": {
+                "members": [
+                    {"contact": {"id": 155881724, "names": [{"name": "Романова"}]}},
+                    {"contact": {"id": 223732986, "name": "Сергей"}},
+                ]
+            }
+        }
 
     transport.client.invoke = fake_invoke  # type: ignore[assignment]
-    transport._schedule_probe(-77)
-    transport._schedule_probe(-77)  # повтор — no-op
+    transport._schedule_members(-77)
+    transport._schedule_members(-77)  # повтор — no-op
     await asyncio.sleep(0.05)  # даём фоновой задаче отработать
-    assert calls["n"] == 1
-    assert calls["opcodes"] == [int(Op.GET_MEMBERS)]
-    assert -77 in transport._probed_chats
+
+    assert calls["opcodes"] == [int(Op.GET_MEMBERS)], "ровно один запрос участников"
+    assert transport._names[155881724] == "Романова"
+    assert transport._names[223732986] == "Сергей"
+    assert -77 in transport._members_loaded
 
 
 async def test_send_retries_after_connection_closed() -> None:
