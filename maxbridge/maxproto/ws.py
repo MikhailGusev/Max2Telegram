@@ -83,6 +83,11 @@ class MaxWSClient:
     def has_session(self) -> bool:
         return self.session_path.exists()
 
+    @property
+    def connected(self) -> bool:
+        """Есть живое соединение и мы залогинены — можно слать запросы."""
+        return self._conn is not None and self._logged_in
+
     def _load_session(self) -> bool:
         if not self.session_path.exists():
             return False

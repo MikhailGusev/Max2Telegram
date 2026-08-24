@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..maxproto import MaxWSClient, Op
+from ..maxproto import MaxProtocolError, MaxWSClient, Op
 from ..models import Attachment, MaxMessage
 from .base import MaxTransport
 
@@ -153,9 +153,13 @@ class UserbotTransport(MaxTransport):
         self._resolving.add(user_id)
         try:
             response = await self.client.invoke(Op.RESOLVE_USERS, {"contactIds": [user_id]})
-            for person in (response.get("payload") or {}).get("contacts") or []:
-                if isinstance(person, dict):
-                    self._remember_person(person)
+            payload = response.get("payload") or {}
+            # ответ на RESOLVE_USERS кладёт людей под разными ключами в зависимости
+            # от версии — забираем из всех известных, как при синхронизации
+            for key in ("contacts", "profiles", "users"):
+                for person in payload.get(key) or []:
+                    if isinstance(person, dict):
+                        self._remember_person(person)
         except Exception as exc:  # noqa: BLE001 - имя не критично
             log.debug("не смог получить имя пользователя %s: %s", user_id, exc)
         finally:
@@ -240,9 +244,20 @@ class UserbotTransport(MaxTransport):
         if sender_id and sender_id not in self._names:
             await self._resolve_user(sender_id)
 
+        sender_name = self._names.get(sender_id, "")
+        if not sender_name and sender_id != self.client.me_id:
+            # диагностика групповых чатов: имя не определилось — покажем, в каком
+            # поле пакета лежит отправитель (только КЛЮЧИ, без приватного текста)
+            log.debug(
+                "имя отправителя не определилось: chat=%s kind=%s sender_id=%s ключи_сообщения=%s",
+                chat_id,
+                self._kinds.get(chat_id, "?"),
+                sender_id,
+                sorted(raw.keys()),
+            )
+
         # в личном диалоге собеседник и есть название чата: если при
         # синхронизации имени ещё не знали, забираем его из первого же письма
-        sender_name = self._names.get(sender_id, "")
         if (
             sender_name
             and not self._titles.get(chat_id)
@@ -268,8 +283,30 @@ class UserbotTransport(MaxTransport):
         await self._emit(message)
 
     # ---------------------------------------------------------------- методы
+    async def _send_with_reconnect(self, coro_factory: Any) -> dict[str, Any]:
+        """Отправка, переживающая обрыв соединения.
+
+        MAX иногда закрывает WS в момент отправки (частый случай при ответе в
+        группу — сообщение терялось с «соединение закрыто»). run_forever уже
+        переподключается сам; здесь мы просто ждём восстановления связи и
+        повторяем отправку один раз, вместо того чтобы отдать ошибку наверх.
+        """
+        try:
+            return await coro_factory()
+        except MaxProtocolError as exc:
+            if "закры" not in str(exc).lower():
+                raise
+            log.info("MAX закрыл соединение при отправке — жду переподключения и повторяю")
+            for _ in range(30):  # до ~15 секунд ожидания реконнекта
+                if self.client.connected:
+                    break
+                await asyncio.sleep(0.5)
+            return await coro_factory()
+
     async def send(self, chat_id: int, text: str, *, reply_to: str = "") -> str:
-        response = await self.client.send_message(chat_id, text, reply_to=reply_to or None)
+        response = await self._send_with_reconnect(
+            lambda: self.client.send_message(chat_id, text, reply_to=reply_to or None)
+        )
         payload = response.get("payload") or {}
         message = payload.get("message") or {}
         return str(message.get("id") or "")
@@ -315,8 +352,10 @@ class UserbotTransport(MaxTransport):
         else:
             attach = await self.client.upload_file(chat_id, data, filename)
 
-        response = await self.client.send_message(
-            chat_id, caption, reply_to=reply_to or None, attaches=[attach]
+        response = await self._send_with_reconnect(
+            lambda: self.client.send_message(
+                chat_id, caption, reply_to=reply_to or None, attaches=[attach]
+            )
         )
         message = (response.get("payload") or {}).get("message") or {}
         return str(message.get("id") or "")
