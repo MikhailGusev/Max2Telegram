@@ -74,6 +74,25 @@ async def test_unresolvable_user_not_retried() -> None:
     assert calls["n"] == 1, "по неотвечающему id повторных запросов нет"
 
 
+async def test_probe_reads_history_once() -> None:
+    """Зонд участников — только чтение истории, ровно один раз на группу."""
+    import asyncio
+
+    transport = UserbotTransport("не-важно.json")
+    calls = {"n": 0}
+
+    async def fake_history(chat_id, *, count=30):
+        calls["n"] += 1
+        return {"messages": [{"id": "1"}], "profiles": [{"id": 5, "name": "X"}]}
+
+    transport.client.fetch_history = fake_history  # type: ignore[assignment]
+    transport._schedule_probe(-77)
+    transport._schedule_probe(-77)  # повтор — no-op
+    await asyncio.sleep(0.05)  # даём фоновой задаче отработать
+    assert calls["n"] == 1
+    assert -77 in transport._probed_chats
+
+
 async def test_send_retries_after_connection_closed() -> None:
     transport = UserbotTransport("не-важно.json")
     # эмулируем «уже переподключились», чтобы повтор не ждал реально
