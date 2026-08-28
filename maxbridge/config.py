@@ -58,6 +58,10 @@ class Config:
     ai_base_url: str
 
     stealth_mode: bool
+    #: через сколько секунд после доставки авто-пометить сообщение прочитанным
+    #: в MAX, если владелец не нажал «Не прочитано». 0 = не авто-читать (только
+    #: вручную). Работает только в стелс-режиме.
+    auto_read_seconds: int
     digest_hour: int
     followup_minutes: int
     db_path: Path
@@ -158,6 +162,7 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         ai_proxy=os.getenv("AI_PROXY", "").strip(),
         ai_base_url=os.getenv("AI_BASE_URL", "").strip(),
         stealth_mode=_bool("STEALTH_MODE", True),
+        auto_read_seconds=_int("AUTO_READ_SECONDS", 30),
         digest_hour=_int("DIGEST_HOUR", 9),
         followup_minutes=_int("FOLLOWUP_MINUTES", 180),
         db_path=Path(os.getenv("DB_PATH", "data/maxbridge.db")),

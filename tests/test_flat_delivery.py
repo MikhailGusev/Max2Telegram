@@ -72,6 +72,10 @@ def make_bridge(tmp_path: Path, *, billing=None):
     bridge.transcriber = Transcriber()
     bridge.billing = billing
     bridge.bot = FakeBot()
+    bridge._read_pending = {}
+    bridge._read_held = set()
+    bridge._read_done = set()
+    bridge._read_tasks = set()
     return bridge, registry.accounts[0]
 
 

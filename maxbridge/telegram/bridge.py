@@ -109,6 +109,11 @@ class TelegramBridge:
         self.clients: Any = None
         self.spin_up: Any = None
         self._onboarding: dict[int, Any] = {}  # tg_user_id -> активная попытка QR
+        # авто-прочтение: таймеры на доставленные сообщения и их состояние
+        self._read_pending: dict[tuple[str, int, str], asyncio.Task[None]] = {}
+        self._read_held: set[tuple[str, int, str]] = set()   # владелец нажал «Не прочитано»
+        self._read_done: set[tuple[str, int, str]] = set()   # уже прочитано (авто или вручную)
+        self._read_tasks: set[asyncio.Task[None]] = set()
         self._register()
 
         for account in self.accounts:
@@ -150,6 +155,7 @@ class TelegramBridge:
                 account, message, target, thread_id, text, keyboard
             )
             if sent_id is not None:
+                self._maybe_schedule_auto_read(account, message, target, sent_id)
                 return sent_id
             # не получилось перетащить файл — ниже уйдёт текст со ссылкой
 
@@ -176,7 +182,96 @@ class TelegramBridge:
                 )
             else:
                 raise
+        self._maybe_schedule_auto_read(account, message, target, sent.message_id)
         return sent.message_id
+
+    # ------------------------------------------------------- авто-прочтение
+    def _maybe_schedule_auto_read(
+        self, account: Account, message: MaxMessage, tg_target: int, tg_msg: int
+    ) -> None:
+        """Ставит таймер: через auto_read_seconds пометить прочитанным и убрать
+        кнопку, если владелец не нажал «Не прочитано». Только в стелс-режиме."""
+        if not account.config.stealth_mode or self.config.auto_read_seconds <= 0:
+            return
+        key = (account.name, message.chat_id, str(message.message_id))
+        task = asyncio.create_task(
+            self._auto_read_later(
+                account, key, tg_target, tg_msg, message.chat_id, str(message.message_id)
+            )
+        )
+        self._read_pending[key] = task
+        self._read_tasks.add(task)
+        task.add_done_callback(self._read_tasks.discard)
+
+    async def _auto_read_later(
+        self,
+        account: Account,
+        key: tuple[str, int, str],
+        tg_target: int,
+        tg_msg: int,
+        max_chat: int,
+        max_msg: str,
+    ) -> None:
+        try:
+            await asyncio.sleep(self.config.auto_read_seconds)
+        except asyncio.CancelledError:
+            return
+        if key in self._read_held or key in self._read_done:
+            return
+        self._read_done.add(key)
+        self._read_pending.pop(key, None)
+        try:
+            await account.transport.mark_read(max_chat, max_msg)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("авто-прочтение не удалось для %s: %s", max_msg, exc)
+        try:
+            await self.bot.edit_message_reply_markup(
+                chat_id=tg_target, message_id=tg_msg, reply_markup=None
+            )
+        except TelegramBadRequest:
+            pass
+
+    async def _hold_unread(self, query: CallbackQuery, account: Account, rest: str) -> None:
+        """Кнопка «Не прочитано»: отменяет авто-прочтение, держит непрочитанным,
+        меняет кнопку на «Прочитано» для ручной отметки позже."""
+        chat_raw, _, msg = rest.partition(":")
+        key = (account.name, int(chat_raw), msg)
+        self._read_held.add(key)
+        task = self._read_pending.pop(key, None)
+        if task is not None:
+            task.cancel()
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="👁 Прочитано", callback_data=f"readnow:{chat_raw}:{msg}")]
+            ]
+        )
+        if query.message is not None:
+            try:
+                await query.message.edit_reply_markup(reply_markup=keyboard)
+            except TelegramBadRequest:
+                pass
+        await query.answer("Оставил непрочитанным")
+
+    async def _mark_read_now(self, query: CallbackQuery, account: Account, rest: str) -> None:
+        """Кнопка «Прочитано»: помечает прочитанным в MAX и убирает кнопку."""
+        chat_raw, _, msg = rest.partition(":")
+        key = (account.name, int(chat_raw), msg)
+        self._read_held.discard(key)
+        self._read_done.add(key)
+        task = self._read_pending.pop(key, None)
+        if task is not None:
+            task.cancel()
+        try:
+            await account.transport.mark_read(int(chat_raw), msg)
+        except Exception:  # noqa: BLE001
+            await query.answer("Не получилось", show_alert=True)
+            return
+        if query.message is not None:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except TelegramBadRequest:
+                pass
+        await query.answer("Прочитано")
 
     async def _deliver_media(
         self,
@@ -305,28 +400,19 @@ class TelegramBridge:
     def _keyboard(
         self, account: Account, message: MaxMessage, verdict: Verdict
     ) -> InlineKeyboardMarkup | None:
-        buttons: list[list[InlineKeyboardButton]] = []
-        row: list[InlineKeyboardButton] = []
-        if self.ai.enabled and verdict.needs_reply:
-            row.append(
-                InlineKeyboardButton(text="✍️ Черновики", callback_data=f"draft:{message.chat_id}")
-            )
-        if account.config.stealth_mode:
-            row.append(
-                InlineKeyboardButton(
-                    text="👁 Прочитано",
-                    callback_data=f"read:{message.chat_id}:{message.message_id}",
-                )
-            )
-        if row:
-            buttons.append(row)
-        buttons.append(
-            [
-                InlineKeyboardButton(text="🔕 Тише", callback_data=f"mute:{message.chat_id}"),
-                InlineKeyboardButton(text="⭐ Важный", callback_data=f"vip:{message.chat_id}"),
-            ]
+        """Одна кнопка «Не прочитано» — вето на авто-прочтение (только в стелсе).
+
+        Без стелса мост и так помечает прочитанным сразу, кнопка не нужна. Через
+        auto_read_seconds кнопка сама исчезнет и сообщение уйдёт прочитанным,
+        если владелец её не нажал. Больше ленту ничем не засоряем.
+        """
+        if not account.config.stealth_mode:
+            return None
+        button = InlineKeyboardButton(
+            text="🔵 Не прочитано",
+            callback_data=f"keepunread:{message.chat_id}:{message.message_id}",
         )
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
+        return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
     # -------------------------------------------------------- выбор аккаунта
     def _account_for(self, event: Message | CallbackQuery) -> Account | None:
@@ -1197,6 +1283,10 @@ class TelegramBridge:
             await self._send_draft(query, account, rest)
         elif action == "write":
             await self._write_from_callback(query, account, rest)
+        elif action == "keepunread":
+            await self._hold_unread(query, account, rest)
+        elif action == "readnow":
+            await self._mark_read_now(query, account, rest)
         else:
             await query.answer()
 
