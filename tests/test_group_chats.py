@@ -125,6 +125,24 @@ async def test_send_retries_after_connection_closed() -> None:
     assert result["payload"]["message"]["id"] == "OK"
 
 
+async def test_send_retries_on_no_connection() -> None:
+    """«нет соединения с MAX» (окно реконнекта) — тоже повторяем, не роняем."""
+    transport = UserbotTransport("не-важно.json")
+    transport.client._conn = object()  # type: ignore[assignment]
+    transport.client._logged_in = True
+    calls = {"n": 0}
+
+    async def factory():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise MaxProtocolError("нет соединения с MAX: сначала connect()")
+        return {"payload": {"message": {"id": "OK"}}}
+
+    result = await transport._send_with_reconnect(factory)
+    assert calls["n"] == 2
+    assert result["payload"]["message"]["id"] == "OK"
+
+
 async def test_send_does_not_retry_other_errors() -> None:
     transport = UserbotTransport("не-важно.json")
 

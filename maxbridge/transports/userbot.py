@@ -367,21 +367,27 @@ class UserbotTransport(MaxTransport):
     async def _send_with_reconnect(self, coro_factory: Any) -> dict[str, Any]:
         """Отправка, переживающая обрыв соединения.
 
-        MAX иногда закрывает WS в момент отправки (частый случай при ответе в
-        группу — сообщение терялось с «соединение закрыто»). run_forever уже
-        переподключается сам; здесь мы просто ждём восстановления связи и
-        повторяем отправку один раз, вместо того чтобы отдать ошибку наверх.
+        MAX иногда рвёт WS или оказывается в окне переподключения в момент
+        отправки — ответ падал то с «соединение закрыто», то с «нет соединения
+        с MAX». run_forever переподключается сам; здесь мы ждём восстановления
+        связи и повторяем отправку, вместо того чтобы отдать ошибку наверх.
         """
         try:
             return await coro_factory()
         except MaxProtocolError as exc:
-            if "закры" not in str(exc).lower():
+            msg = str(exc).lower()
+            if "закры" not in msg and "нет соединения" not in msg:
                 raise
-            log.info("MAX закрыл соединение при отправке — жду переподключения и повторяю")
-            for _ in range(30):  # до ~15 секунд ожидания реконнекта
+            log.info("нет связи с MAX при отправке — жду переподключения и повторяю")
+            for _ in range(60):  # до ~30 секунд ожидания реконнекта
                 if self.client.connected:
                     break
                 await asyncio.sleep(0.5)
+            if not self.client.connected:
+                raise MaxProtocolError(
+                    "MAX недоступен: соединение не восстановилось за 30 с "
+                    "(возможен бан по IP или сетевой сбой)"
+                )
             return await coro_factory()
 
     async def send(self, chat_id: int, text: str, *, reply_to: str = "") -> str:
