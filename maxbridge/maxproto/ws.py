@@ -480,28 +480,25 @@ class MaxWSClient:
             )
         return self._http
 
-    async def file_url(
-        self, chat_id: int, message_id: str, file_id: int, token: str = ""
-    ) -> str:
+    async def file_url(self, chat_id: int, message_id: str, file_id: int) -> str:
         """Прямая ссылка на файл из сообщения.
 
-        MAX не отвечал на DOWNLOAD_FILE без token из вложения (opcode 88 висел до
-        таймаута), поэтому передаём token, если он есть.
+        DOWNLOAD_FILE (88) висел до таймаута, потому что messageId уходил СТРОКОЙ,
+        а сервер MAX ждёт число (long) и строку молча отбрасывал. Шлём числом.
         """
-        payload_req: dict[str, Any] = {
-            "fileId": int(file_id),
-            "chatId": int(chat_id),
-            "messageId": str(message_id),
-        }
-        if token:
-            payload_req["token"] = token
+        mid: Any = message_id
+        if str(message_id).lstrip("-").isdigit():
+            mid = int(message_id)
         log.debug(
-            "ЗОНД скачивания: DOWNLOAD_FILE запрос fileId=%s messageId=%s token=%s",
+            "ЗОНД скачивания: DOWNLOAD_FILE fileId=%s messageId=%s тип=%s",
             file_id,
             message_id,
-            bool(token),
+            type(mid).__name__,
         )
-        response = await self.invoke(Op.DOWNLOAD_FILE, payload_req)
+        response = await self.invoke(
+            Op.DOWNLOAD_FILE,
+            {"fileId": int(file_id), "chatId": int(chat_id), "messageId": mid},
+        )
         payload = response.get("payload") or {}
         url = str(payload.get("url") or "")
         if not url:
@@ -510,9 +507,12 @@ class MaxWSClient:
 
     async def video_url(self, chat_id: int, message_id: str, video_id: int) -> str:
         """Прямая ссылка на видео. MAX отдаёт несколько качеств — берём первое."""
+        mid: Any = message_id
+        if str(message_id).lstrip("-").isdigit():
+            mid = int(message_id)
         response = await self.invoke(
             Op.DOWNLOAD_VIDEO,
-            {"videoId": int(video_id), "chatId": int(chat_id), "messageId": str(message_id)},
+            {"videoId": int(video_id), "chatId": int(chat_id), "messageId": mid},
         )
         formats = dict(response.get("payload") or {})
         for service_key in ("cache", "EXTERNAL", "failoverHost", "liveDvr"):

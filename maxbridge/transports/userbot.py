@@ -425,10 +425,7 @@ class UserbotTransport(MaxTransport):
         url = attachment.url
         if attachment.kind == "file" and raw.get("fileId") is not None:
             url = await self.client.file_url(
-                message.chat_id,
-                str(message.message_id),
-                int(raw["fileId"]),
-                token=str(raw.get("token") or ""),
+                message.chat_id, str(message.message_id), int(raw["fileId"])
             )
         elif attachment.kind == "video" and raw.get("videoId") is not None:
             url = await self.client.video_url(
