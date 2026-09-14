@@ -363,17 +363,6 @@ class UserbotTransport(MaxTransport):
             raw=raw,
         )
 
-        # зонд вложений: структура ЛЮБОГО вложения (только имена полей + тип +
-        # есть ли url). По ней поймём, под каким полем MAX кладёт id файла.
-        for att in message.attachments:
-            log.debug(
-                "ЗОНД вложения: kind=%s тип=%s url=%s ключи=%s",
-                att.kind,
-                str(att.raw.get("_type") or att.raw.get("type")),
-                bool(att.url),
-                sorted(att.raw.keys()),
-            )
-
         await self._emit(message)
 
     # ---------------------------------------------------------------- методы

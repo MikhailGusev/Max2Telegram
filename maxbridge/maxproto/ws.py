@@ -486,7 +486,12 @@ class MaxWSClient:
             Op.DOWNLOAD_FILE,
             {"fileId": int(file_id), "chatId": int(chat_id), "messageId": str(message_id)},
         )
-        return str((response.get("payload") or {}).get("url") or "")
+        payload = response.get("payload") or {}
+        url = str(payload.get("url") or "")
+        if not url:
+            # зонд: DOWNLOAD_FILE не дал ссылку — покажем, что он вернул
+            log.debug("ЗОНД скачивания: DOWNLOAD_FILE вернул ключи=%s", sorted(payload.keys()))
+        return url
 
     async def video_url(self, chat_id: int, message_id: str, video_id: int) -> str:
         """Прямая ссылка на видео. MAX отдаёт несколько качеств — берём первое."""
