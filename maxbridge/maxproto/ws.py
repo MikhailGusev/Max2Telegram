@@ -480,16 +480,31 @@ class MaxWSClient:
             )
         return self._http
 
-    async def file_url(self, chat_id: int, message_id: str, file_id: int) -> str:
-        """Прямая ссылка на файл из сообщения."""
-        response = await self.invoke(
-            Op.DOWNLOAD_FILE,
-            {"fileId": int(file_id), "chatId": int(chat_id), "messageId": str(message_id)},
+    async def file_url(
+        self, chat_id: int, message_id: str, file_id: int, token: str = ""
+    ) -> str:
+        """Прямая ссылка на файл из сообщения.
+
+        MAX не отвечал на DOWNLOAD_FILE без token из вложения (opcode 88 висел до
+        таймаута), поэтому передаём token, если он есть.
+        """
+        payload_req: dict[str, Any] = {
+            "fileId": int(file_id),
+            "chatId": int(chat_id),
+            "messageId": str(message_id),
+        }
+        if token:
+            payload_req["token"] = token
+        log.debug(
+            "ЗОНД скачивания: DOWNLOAD_FILE запрос fileId=%s messageId=%s token=%s",
+            file_id,
+            message_id,
+            bool(token),
         )
+        response = await self.invoke(Op.DOWNLOAD_FILE, payload_req)
         payload = response.get("payload") or {}
         url = str(payload.get("url") or "")
         if not url:
-            # зонд: DOWNLOAD_FILE не дал ссылку — покажем, что он вернул
             log.debug("ЗОНД скачивания: DOWNLOAD_FILE вернул ключи=%s", sorted(payload.keys()))
         return url
 
