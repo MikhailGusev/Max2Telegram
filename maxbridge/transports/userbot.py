@@ -363,18 +363,16 @@ class UserbotTransport(MaxTransport):
             raw=raw,
         )
 
-        # зонд вложений: покажем структуру вложения, которое надо скачивать, но
-        # у которого нет ни url, ни ожидаемого fileId/videoId — по ней поймём,
-        # под каким полем MAX кладёт идентификатор файла. Только имена полей.
+        # зонд вложений: структура ЛЮБОГО вложения (только имена полей + тип +
+        # есть ли url). По ней поймём, под каким полем MAX кладёт id файла.
         for att in message.attachments:
-            if att.kind in {"file", "video", "audio", "voice"} and not att.url:
-                if att.raw.get("fileId") is None and att.raw.get("videoId") is None:
-                    log.debug(
-                        "ЗОНД вложения: kind=%s тип=%s ключи=%s",
-                        att.kind,
-                        str(att.raw.get("_type") or att.raw.get("type")),
-                        sorted(att.raw.keys()),
-                    )
+            log.debug(
+                "ЗОНД вложения: kind=%s тип=%s url=%s ключи=%s",
+                att.kind,
+                str(att.raw.get("_type") or att.raw.get("type")),
+                bool(att.url),
+                sorted(att.raw.keys()),
+            )
 
         await self._emit(message)
 
