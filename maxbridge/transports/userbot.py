@@ -347,6 +347,7 @@ class UserbotTransport(MaxTransport):
         ):
             self._titles[chat_id] = sender_name
 
+        attaches_raw = raw.get("attaches") or []
         message = MaxMessage(
             chat_id=chat_id,
             message_id=str(raw.get("id") or ""),
@@ -358,9 +359,23 @@ class UserbotTransport(MaxTransport):
             ts=int(raw.get("time") or 0) or int(time.time() * 1000),
             outgoing=bool(sender_id and sender_id == self.client.me_id),
             reply_to=str(((raw.get("link") or {}).get("messageId")) or ""),
-            attachments=_parse_attaches(raw.get("attaches") or []),
+            attachments=_parse_attaches(attaches_raw),
             raw=raw,
         )
+
+        # зонд вложений: сообщение без текста и без распознанных вложений — скорее
+        # всего файл, который мы не разобрали. Логируем ФОРМУ (только имена полей
+        # и тип вложения), чтобы понять, где MAX прячет файл.
+        if not message.attachments and not message.text and not message.outgoing:
+            sample = attaches_raw[0] if attaches_raw and isinstance(attaches_raw[0], dict) else None
+            log.debug(
+                "ЗОНД вложения: ключи_сообщения=%s attaches=%d %s",
+                sorted(raw.keys()),
+                len(attaches_raw),
+                (sorted(sample.keys()), str(sample.get("_type") or sample.get("type")))
+                if sample else "attaches пуст — файл в другом поле",
+            )
+
         await self._emit(message)
 
     # ---------------------------------------------------------------- методы
