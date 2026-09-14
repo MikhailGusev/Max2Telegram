@@ -363,18 +363,18 @@ class UserbotTransport(MaxTransport):
             raw=raw,
         )
 
-        # зонд вложений: сообщение без текста и без распознанных вложений — скорее
-        # всего файл, который мы не разобрали. Логируем ФОРМУ (только имена полей
-        # и тип вложения), чтобы понять, где MAX прячет файл.
-        if not message.attachments and not message.text and not message.outgoing:
-            sample = attaches_raw[0] if attaches_raw and isinstance(attaches_raw[0], dict) else None
-            log.debug(
-                "ЗОНД вложения: ключи_сообщения=%s attaches=%d %s",
-                sorted(raw.keys()),
-                len(attaches_raw),
-                (sorted(sample.keys()), str(sample.get("_type") or sample.get("type")))
-                if sample else "attaches пуст — файл в другом поле",
-            )
+        # зонд вложений: покажем структуру вложения, которое надо скачивать, но
+        # у которого нет ни url, ни ожидаемого fileId/videoId — по ней поймём,
+        # под каким полем MAX кладёт идентификатор файла. Только имена полей.
+        for att in message.attachments:
+            if att.kind in {"file", "video", "audio", "voice"} and not att.url:
+                if att.raw.get("fileId") is None and att.raw.get("videoId") is None:
+                    log.debug(
+                        "ЗОНД вложения: kind=%s тип=%s ключи=%s",
+                        att.kind,
+                        str(att.raw.get("_type") or att.raw.get("type")),
+                        sorted(att.raw.keys()),
+                    )
 
         await self._emit(message)
 
