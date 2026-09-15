@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable
 import websockets
 from websockets.asyncio.client import ClientConnection
 
-from .opcodes import Op
+from .opcodes import Op, SERVER_EVENTS
 
 log = logging.getLogger("maxbridge.maxproto")
 
@@ -202,6 +202,20 @@ class MaxWSClient:
                     if waiter is not None and not waiter.done():
                         waiter.set_result(None)
             return
+
+        # зонд: пакеты, не сопоставленные ни с ожидающим запросом, ни с известным
+        # событием. Если ответ на DOWNLOAD_FILE (88) приходит с чужим seq —
+        # увидим его тут (opcode 88 среди «непойманных»).
+        opcode = packet.get("opcode")
+        if opcode not in SERVER_EVENTS and opcode != Op.EVT_UPLOAD_PROGRESS:
+            body = packet.get("payload")
+            log.debug(
+                "ЗОНД пакета: непойманный opcode=%s seq=%s cmd=%s payload_ключи=%s",
+                opcode,
+                seq,
+                packet.get("cmd"),
+                sorted(body.keys()) if isinstance(body, dict) else type(body).__name__,
+            )
 
         for handler in self._handlers:
             try:
@@ -495,9 +509,12 @@ class MaxWSClient:
             message_id,
             type(mid).__name__,
         )
-        response = await self.invoke(
-            Op.DOWNLOAD_FILE,
-            {"fileId": int(file_id), "chatId": int(chat_id), "messageId": mid},
+        response = await asyncio.wait_for(
+            self.invoke(
+                Op.DOWNLOAD_FILE,
+                {"fileId": int(file_id), "chatId": int(chat_id), "messageId": mid},
+            ),
+            timeout=12,  # опкод 88 часто не отвечает — не морозим приём на 30 с
         )
         payload = response.get("payload") or {}
         url = str(payload.get("url") or "")
