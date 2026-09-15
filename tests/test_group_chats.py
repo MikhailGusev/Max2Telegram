@@ -125,6 +125,56 @@ async def test_send_retries_after_connection_closed() -> None:
     assert result["payload"]["message"]["id"] == "OK"
 
 
+async def test_forwarded_file_extracted_from_inner_message() -> None:
+    """Пересланное сообщение (link.type=FORWARD): файл лежит во вложенном
+    link.message.attaches, а внешнее пустое — достаём контент оттуда."""
+    from maxbridge.maxproto.opcodes import Op
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client.me_id = 100
+    captured = []
+    transport.on_message(lambda m: captured.append(m) or _noop())
+
+    packet = {
+        "opcode": int(Op.EVT_NEW_MESSAGE),
+        "payload": {
+            "chatId": -100,
+            "message": {
+                "id": "outer1",
+                "sender": 200,
+                "text": "",
+                "attaches": [],
+                "link": {
+                    "type": "FORWARD",
+                    "chatId": -999,
+                    "message": {
+                        "id": "inner1",
+                        "sender": 300,
+                        "text": "смотри файл",
+                        "attaches": [
+                            {"_type": "FILE", "fileId": 555, "name": "doc.pdf", "token": "t"}
+                        ],
+                    },
+                },
+            },
+        },
+    }
+    await transport._on_packet(packet)
+
+    assert len(captured) == 1
+    msg = captured[0]
+    assert msg.text == "смотри файл"
+    assert len(msg.attachments) == 1
+    att = msg.attachments[0]
+    assert att.kind == "file" and att.name == "doc.pdf"
+    # координаты оригинала для скачивания
+    assert att.raw["_fwd_chat"] == -999 and att.raw["_fwd_msg"] == "inner1"
+
+
+async def _noop():
+    return None
+
+
 async def test_send_retries_on_no_connection() -> None:
     """«нет соединения с MAX» (окно реконнекта) — тоже повторяем, не роняем."""
     transport = UserbotTransport("не-важно.json")

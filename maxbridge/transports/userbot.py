@@ -348,18 +348,43 @@ class UserbotTransport(MaxTransport):
             self._titles[chat_id] = sender_name
 
         attaches_raw = raw.get("attaches") or []
+        text_val = str(raw.get("text") or "")
+
+        # пересланное сообщение (link.type=FORWARD): текст и файл лежат во
+        # вложенном link.message, а внешнее — пустое. Достаём контент оттуда.
+        link = raw.get("link") or {}
+        fwd = (
+            link.get("message")
+            if isinstance(link, dict) and str(link.get("type") or "").upper() == "FORWARD"
+            else None
+        )
+        fwd_chat = fwd_msg = None
+        if isinstance(fwd, dict):
+            if not attaches_raw:
+                attaches_raw = fwd.get("attaches") or []
+            if not text_val:
+                text_val = str(fwd.get("text") or "")
+            fwd_chat, fwd_msg = link.get("chatId"), fwd.get("id")
+
+        attachments = _parse_attaches(attaches_raw)
+        # для скачивания пересланного файла нужны координаты оригинала
+        if fwd_chat is not None and fwd_msg is not None:
+            for att in attachments:
+                att.raw.setdefault("_fwd_chat", fwd_chat)
+                att.raw.setdefault("_fwd_msg", fwd_msg)
+
         message = MaxMessage(
             chat_id=chat_id,
             message_id=str(raw.get("id") or ""),
-            text=str(raw.get("text") or ""),
+            text=text_val,
             sender_id=sender_id,
             sender_name=sender_name,
             chat_title=self._titles.get(chat_id, ""),
             chat_kind=self._kinds.get(chat_id, "dialog"),
             ts=int(raw.get("time") or 0) or int(time.time() * 1000),
             outgoing=bool(sender_id and sender_id == self.client.me_id),
-            reply_to=str(((raw.get("link") or {}).get("messageId")) or ""),
-            attachments=_parse_attaches(attaches_raw),
+            reply_to=str((link.get("messageId") if isinstance(link, dict) else "") or ""),
+            attachments=attachments,
             raw=raw,
         )
 
@@ -432,15 +457,16 @@ class UserbotTransport(MaxTransport):
         attachment = message.attachments[index]
         raw = attachment.raw
 
+        # для пересланного файла качаем по координатам оригинала (иначе MAX
+        # не найдёт файл в текущем сообщении)
+        dl_chat = int(raw.get("_fwd_chat") or message.chat_id)
+        dl_msg = str(raw.get("_fwd_msg") or message.message_id)
+
         url = attachment.url
         if attachment.kind == "file" and raw.get("fileId") is not None:
-            url = await self.client.file_url(
-                message.chat_id, str(message.message_id), int(raw["fileId"])
-            )
+            url = await self.client.file_url(dl_chat, dl_msg, int(raw["fileId"]))
         elif attachment.kind == "video" and raw.get("videoId") is not None:
-            url = await self.client.video_url(
-                message.chat_id, str(message.message_id), int(raw["videoId"])
-            )
+            url = await self.client.video_url(dl_chat, dl_msg, int(raw["videoId"]))
 
         if not url:
             raise ValueError(f"не смог определить ссылку на вложение «{attachment.kind}»")
