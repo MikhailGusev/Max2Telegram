@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable
 import websockets
 from websockets.asyncio.client import ClientConnection
 
-from .opcodes import Op, SERVER_EVENTS
+from .opcodes import Op
 
 log = logging.getLogger("maxbridge.maxproto")
 
@@ -67,6 +67,12 @@ class MaxWSClient:
         self._handlers: list[PacketHandler] = []
         self._recv_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        # обработка серверных событий вынесена из цикла приёма в отдельный
+        # воркер: иначе хендлер, который сам шлёт запрос к MAX (скачать файл,
+        # получить участников), блокирует чтение ответа на этот же запрос —
+        # дедлок до таймаута. Очередь держит порядок сообщений.
+        self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._worker_task: asyncio.Task[None] | None = None
         #: ожидание подтверждения загрузки файла/видео (событие opcode 136)
         self._upload_waiters: dict[str, asyncio.Future[None]] = {}
         self._http: Any = None  # aiohttp.ClientSession, создаётся лениво
@@ -129,10 +135,12 @@ class MaxWSClient:
             ping_interval=None,  # у протокола свой keepalive (opcode 1)
         )
         self._recv_task = asyncio.create_task(self._recv_loop(), name="max-recv")
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._event_worker(), name="max-worker")
 
     async def close(self) -> None:
         self._closing = True
-        for task in (self._keepalive_task, self._recv_task):
+        for task in (self._keepalive_task, self._recv_task, self._worker_task):
             if task and not task.done():
                 task.cancel()
         if self._conn is not None:
@@ -203,25 +211,23 @@ class MaxWSClient:
                         waiter.set_result(None)
             return
 
-        # зонд: пакеты, не сопоставленные ни с ожидающим запросом, ни с известным
-        # событием. Если ответ на DOWNLOAD_FILE (88) приходит с чужим seq —
-        # увидим его тут (opcode 88 среди «непойманных»).
-        opcode = packet.get("opcode")
-        if opcode not in SERVER_EVENTS and opcode != Op.EVT_UPLOAD_PROGRESS:
-            body = packet.get("payload")
-            log.debug(
-                "ЗОНД пакета: непойманный opcode=%s seq=%s cmd=%s payload_ключи=%s",
-                opcode,
-                seq,
-                packet.get("cmd"),
-                sorted(body.keys()) if isinstance(body, dict) else type(body).__name__,
-            )
+        # событие для хендлеров — в очередь, чтобы не блокировать цикл приёма
+        # (хендлер может сам ждать ответ MAX, который читает этот же цикл)
+        self._events.put_nowait(packet)
 
-        for handler in self._handlers:
-            try:
-                await handler(packet)
-            except Exception:  # noqa: BLE001 - обработчик не должен ронять цикл
-                log.exception("ошибка в обработчике пакета MAX")
+    async def _event_worker(self) -> None:
+        """Последовательно обрабатывает серверные события хендлерами.
+
+        Отдельно от цикла приёма: пока хендлер ждёт ответ MAX (скачивание файла,
+        участники), цикл приёма свободен и может этот ответ прочитать.
+        """
+        while True:
+            packet = await self._events.get()
+            for handler in self._handlers:
+                try:
+                    await handler(packet)
+                except Exception:  # noqa: BLE001 - обработчик не должен ронять цикл
+                    log.exception("ошибка в обработчике пакета MAX")
 
     # ------------------------------------------------------------- keepalive
     async def _keepalive_loop(self) -> None:
@@ -509,12 +515,9 @@ class MaxWSClient:
             message_id,
             type(mid).__name__,
         )
-        response = await asyncio.wait_for(
-            self.invoke(
-                Op.DOWNLOAD_FILE,
-                {"fileId": int(file_id), "chatId": int(chat_id), "messageId": mid},
-            ),
-            timeout=12,  # опкод 88 часто не отвечает — не морозим приём на 30 с
+        response = await self.invoke(
+            Op.DOWNLOAD_FILE,
+            {"fileId": int(file_id), "chatId": int(chat_id), "messageId": mid},
         )
         payload = response.get("payload") or {}
         url = str(payload.get("url") or "")
