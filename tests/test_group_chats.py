@@ -125,6 +125,59 @@ async def test_send_retries_after_connection_closed() -> None:
     assert result["payload"]["message"]["id"] == "OK"
 
 
+async def test_send_gives_up_when_reconnect_fails(monkeypatch) -> None:
+    """Связь не восстановилась за окно ожидания -> понятная ошибка, без вечного
+    ожидания и без повторной отправки в никуда."""
+    import asyncio
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client._conn = None  # type: ignore[assignment]
+    transport.client._logged_in = False  # connected == False и остаётся таким
+
+    async def no_sleep(_seconds):
+        return None  # не ждём реальные 30 секунд
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    calls = {"n": 0}
+
+    async def factory():
+        calls["n"] += 1
+        raise MaxProtocolError("нет соединения с MAX: сначала connect()")
+
+    with pytest.raises(MaxProtocolError, match="не восстановилось"):
+        await transport._send_with_reconnect(factory)
+    assert calls["n"] == 1, "второй отправки быть не должно — связь так и не встала"
+
+
+async def test_send_recovers_after_reconnect_wait(monkeypatch) -> None:
+    """Связь восстановилась во время ожидания -> повтор проходит успешно."""
+    import asyncio
+
+    transport = UserbotTransport("не-важно.json")
+    transport.client._conn = None  # type: ignore[assignment]
+    transport.client._logged_in = False
+
+    async def reconnect_during_sleep(_seconds):
+        # имитируем: за время паузы run_forever переподключился
+        transport.client._conn = object()  # type: ignore[assignment]
+        transport.client._logged_in = True
+
+    monkeypatch.setattr(asyncio, "sleep", reconnect_during_sleep)
+
+    calls = {"n": 0}
+
+    async def factory():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise MaxProtocolError("нет соединения с MAX: сначала connect()")
+        return {"payload": {"message": {"id": "OK"}}}
+
+    result = await transport._send_with_reconnect(factory)
+    assert calls["n"] == 2
+    assert result["payload"]["message"]["id"] == "OK"
+
+
 async def test_forwarded_file_extracted_from_inner_message() -> None:
     """Пересланное сообщение (link.type=FORWARD): файл лежит во вложенном
     link.message.attaches, а внешнее пустое — достаём контент оттуда."""
