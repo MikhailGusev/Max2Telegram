@@ -125,6 +125,25 @@ async def test_send_retries_after_connection_closed() -> None:
     assert result["payload"]["message"]["id"] == "OK"
 
 
+async def test_send_survives_flapping_connection() -> None:
+    """Связь моргнула дважды подряд — одного повтора мало, нужно несколько."""
+    transport = UserbotTransport("не-важно.json")
+    transport.client._conn = object()  # type: ignore[assignment]
+    transport.client._logged_in = True  # connected == True (реконнект мгновенный)
+
+    calls = {"n": 0}
+
+    async def factory():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise MaxProtocolError("соединение закрыто")
+        return {"payload": {"message": {"id": "OK"}}}
+
+    result = await transport._send_with_reconnect(factory)
+    assert calls["n"] == 3, "две неудачи подряд, успех с третьей попытки"
+    assert result["payload"]["message"]["id"] == "OK"
+
+
 async def test_send_gives_up_when_reconnect_fails(monkeypatch) -> None:
     """Связь не восстановилась за окно ожидания -> понятная ошибка, без вечного
     ожидания и без повторной отправки в никуда."""

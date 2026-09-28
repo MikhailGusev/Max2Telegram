@@ -421,25 +421,32 @@ class UserbotTransport(MaxTransport):
         MAX иногда рвёт WS или оказывается в окне переподключения в момент
         отправки — ответ падал то с «соединение закрыто», то с «нет соединения
         с MAX». run_forever переподключается сам; здесь мы ждём восстановления
-        связи и повторяем отправку, вместо того чтобы отдать ошибку наверх.
+        связи и повторяем отправку. Повтор — НЕСКОЛЬКО раз: связь может «моргнуть»
+        подряд (тогда одного повтора мало, и ошибка вылезала наружу).
         """
-        try:
-            return await coro_factory()
-        except MaxProtocolError as exc:
-            msg = str(exc).lower()
-            if "закры" not in msg and "нет соединения" not in msg:
-                raise
-            log.info("нет связи с MAX при отправке — жду переподключения и повторяю")
-            for _ in range(60):  # до ~30 секунд ожидания реконнекта
-                if self.client.connected:
-                    break
-                await asyncio.sleep(0.5)
-            if not self.client.connected:
-                raise MaxProtocolError(
-                    "MAX недоступен: соединение не восстановилось за 30 с "
-                    "(возможен бан по IP или сетевой сбой)"
+        for attempt in range(3):
+            try:
+                return await coro_factory()
+            except MaxProtocolError as exc:
+                msg = str(exc).lower()
+                if "закры" not in msg and "нет соединения" not in msg:
+                    raise
+                log.info(
+                    "нет связи с MAX при отправке (попытка %d) — жду переподключения",
+                    attempt + 1,
                 )
-            return await coro_factory()
+                reconnected = False
+                for _ in range(40):  # до ~20 с ожидания реконнекта
+                    if self.client.connected:
+                        reconnected = True
+                        break
+                    await asyncio.sleep(0.5)
+                if not reconnected:
+                    break  # связь так и не встала — повторять нет смысла
+        raise MaxProtocolError(
+            "MAX недоступен: соединение не восстановилось (возможен бан по IP "
+            "или сетевой сбой)"
+        )
 
     async def send(self, chat_id: int, text: str, *, reply_to: str = "") -> str:
         response = await self._send_with_reconnect(
