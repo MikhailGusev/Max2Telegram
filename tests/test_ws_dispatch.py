@@ -67,6 +67,47 @@ def test_backoff_grows_and_caps() -> None:
     assert seq == sorted(seq)
 
 
+class _FakeContent:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    async def iter_chunked(self, _n):  # noqa: ANN001
+        for c in self._chunks:
+            yield c
+
+
+class _FakeResp:
+    def __init__(self, chunks):
+        self.status = 200
+        self.headers = {}
+        self.content = _FakeContent(chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _FakeSession:
+    closed = False
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def get(self, _url):  # noqa: ANN001
+        return _FakeResp(self._chunks)
+
+
+async def test_download_reads_full_body(tmp_path: Path) -> None:
+    """Регрессия «файл повреждён»: тело должно собираться целиком из всех чанков,
+    а не обрываться на первом (как было с content.read(N))."""
+    client = MaxWSClient(tmp_path / "s.json")
+    client._http = _FakeSession([b"%PDF-1.4", b"\n middle \n", b"%%EOF"])  # type: ignore[assignment]
+    data = await client.download("http://x/file")
+    assert data == b"%PDF-1.4\n middle \n%%EOF"
+
+
 async def test_dispatch_resolves_pending_future(tmp_path: Path) -> None:
     """Базовое: ответ с совпадающим seq резолвит ожидающий invoke."""
     client = MaxWSClient(tmp_path / "s.json")

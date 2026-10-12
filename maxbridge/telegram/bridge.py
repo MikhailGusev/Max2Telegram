@@ -151,8 +151,10 @@ class TelegramBridge:
         keyboard = self._keyboard(account, message, verdict)
 
         if message.attachments and account.transport.supports_media:
+            # подпись к файлу — без строки «📎 имя» (она уже на карточке файла)
+            caption = self._render(message, verdict, flat=not forum, with_attachments=False)
             sent_id = await self._deliver_media(
-                account, message, target, thread_id, text, keyboard
+                account, message, target, thread_id, caption, keyboard
             )
             if sent_id is not None:
                 self._maybe_schedule_auto_read(account, message, target, sent_id)
@@ -369,7 +371,14 @@ class TelegramBridge:
         )
         return created.message_thread_id
 
-    def _render(self, message: MaxMessage, verdict: Verdict, *, flat: bool = False) -> str:
+    def _render(
+        self,
+        message: MaxMessage,
+        verdict: Verdict,
+        *,
+        flat: bool = False,
+        with_attachments: bool = True,
+    ) -> str:
         mark = PRIORITY_MARK.get(verdict.priority, "")
         who = html.escape(message.sender_name or "неизвестный")
         body = html.escape(message.text or "")
@@ -385,14 +394,18 @@ class TelegramBridge:
             parts = [f"{mark}<b>{who}</b>"]
         if body:
             parts.append(body)
-        for attachment in message.attachments:
-            label = attachment.name or attachment.kind
-            if attachment.url:
-                parts.append(
-                    f'📎 <a href="{html.escape(attachment.url)}">{html.escape(label)}</a>'
-                )
-            else:
-                parts.append(f"📎 {html.escape(label)}")
+        # строку 📎 показываем только когда файл НЕ уходит настоящим вложением
+        # (текстовый фолбэк). У доставленного документа имя и так на карточке —
+        # дублировать незачем.
+        if with_attachments:
+            for attachment in message.attachments:
+                label = attachment.name or attachment.kind
+                if attachment.url:
+                    parts.append(
+                        f'📎 <a href="{html.escape(attachment.url)}">{html.escape(label)}</a>'
+                    )
+                else:
+                    parts.append(f"📎 {html.escape(label)}")
         if verdict.reason and verdict.priority == "urgent":
             parts.append(f"<i>{html.escape(verdict.reason)}</i>")
         return "\n".join(parts)

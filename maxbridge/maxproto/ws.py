@@ -564,7 +564,12 @@ class MaxWSClient:
         return ""
 
     async def download(self, url: str, *, limit_bytes: int = 100 * 1024 * 1024) -> bytes:
-        """Скачивает вложение. limit_bytes страхует от гигантских файлов."""
+        """Скачивает вложение ЦЕЛИКОМ. limit_bytes страхует от гигантских файлов.
+
+        Важно: читаем по чанкам до конца. Раньше был `content.read(N)`, который у
+        aiohttp возвращает лишь первый кусок буфера, а не весь файл, — из-за чего
+        PDF/Word/аудио приходили обрезанными («файл повреждён»).
+        """
         session = await self._http_session()
         async with session.get(url) as response:
             if response.status >= 400:
@@ -572,7 +577,14 @@ class MaxWSClient:
             size = int(response.headers.get("Content-Length") or 0)
             if size and size > limit_bytes:
                 raise MaxProtocolError(f"файл слишком большой: {size} байт")
-            return await response.content.read(limit_bytes + 1)
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                total += len(chunk)
+                if total > limit_bytes:
+                    raise MaxProtocolError(f"файл слишком большой: больше {limit_bytes} байт")
+                chunks.append(chunk)
+            return b"".join(chunks)
 
     async def _open_upload(self, chat_id: int, attach_type: str, opcode: int) -> dict[str, Any]:
         response = await self.invoke(opcode, {"count": 1})

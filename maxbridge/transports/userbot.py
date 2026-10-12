@@ -469,11 +469,13 @@ class UserbotTransport(MaxTransport):
         dl_chat = int(raw.get("_fwd_chat") or message.chat_id)
         dl_msg = str(raw.get("_fwd_msg") or message.message_id)
 
+        # скачивание по id, а не по kind: аудио/голосовые/документы приходят с
+        # fileId (как файлы), видео — с videoId. Фото обычно уже с прямым url.
         url = attachment.url
-        if attachment.kind == "file" and raw.get("fileId") is not None:
-            url = await self.client.file_url(dl_chat, dl_msg, int(raw["fileId"]))
-        elif attachment.kind == "video" and raw.get("videoId") is not None:
+        if raw.get("videoId") is not None:
             url = await self.client.video_url(dl_chat, dl_msg, int(raw["videoId"]))
+        elif raw.get("fileId") is not None:
+            url = await self.client.file_url(dl_chat, dl_msg, int(raw["fileId"]))
 
         if not url:
             raise ValueError(f"не смог определить ссылку на вложение «{attachment.kind}»")
