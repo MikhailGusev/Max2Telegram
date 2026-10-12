@@ -52,6 +52,21 @@ async def test_handler_can_invoke_without_deadlock(tmp_path: Path) -> None:
         worker.cancel()
 
 
+def test_backoff_grows_and_caps() -> None:
+    """Пауза реконнекта растёт экспоненциально и упирается в потолок 10 минут."""
+    d = MaxWSClient._backoff_delay
+    assert d(1) == 5.0
+    assert d(2) == 10.0
+    assert d(3) == 20.0
+    assert d(4) == 40.0
+    # дальше растёт и не превышает 600 с
+    assert d(8) == 600.0
+    assert d(50) == 600.0
+    # монотонно не убывает
+    seq = [d(i) for i in range(1, 12)]
+    assert seq == sorted(seq)
+
+
 async def test_dispatch_resolves_pending_future(tmp_path: Path) -> None:
     """Базовое: ответ с совпадающим seq резолвит ожидающий invoke."""
     client = MaxWSClient(tmp_path / "s.json")

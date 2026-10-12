@@ -400,13 +400,25 @@ class MaxWSClient:
             self.me_id = int(contact.get("id") or profile.get("id") or 0)
 
     # ------------------------------------------------------- переподключение
+    @staticmethod
+    def _backoff_delay(attempt: int) -> float:
+        """Экспоненциальная пауза между переподключениями, потолок 10 минут.
+
+        5, 10, 20, 40, 80, 160, 320, 600, 600… Раньше потолок был 60 с и мост
+        долбил MAX каждые ~33 с бесконечно (накапливалось тысячи попыток), а
+        такой шторм сам провоцирует MAX придержать устройство.
+        """
+        return min(600.0, 5.0 * 2.0 ** min(max(attempt, 1) - 1, 7))
+
     async def run_forever(self, *, on_ready: Callable[[dict[str, Any]], Awaitable[None]] | None = None) -> None:
         """Держит соединение живым: логин -> ожидание разрыва -> переподключение."""
         attempt = 0
+        last_ok = asyncio.get_running_loop().time()
         while not self._closing:
             try:
                 payload = await self.login()
                 attempt = 0
+                last_ok = asyncio.get_running_loop().time()
                 if on_ready is not None:
                     await on_ready(payload)
                 while self._conn is not None and not self._closing:
@@ -420,8 +432,17 @@ class MaxWSClient:
             if self._closing:
                 break
             attempt += 1
-            delay = min(60.0, 2.0 ** min(attempt, 5)) + random.uniform(0, 2)
-            log.info("переподключение к MAX через %.1f с (попытка %d)", delay, attempt)
+            delay = self._backoff_delay(attempt) + random.uniform(0, 3)
+            offline = asyncio.get_running_loop().time() - last_ok
+            if offline > 300:  # связи нет дольше 5 минут — это уже не «блип»
+                log.warning(
+                    "давно нет связи с MAX: %.0f мин, попытка %d, следующая через %.0f с",
+                    offline / 60,
+                    attempt,
+                    delay,
+                )
+            else:
+                log.info("переподключение к MAX через %.0f с (попытка %d)", delay, attempt)
             await asyncio.sleep(delay)
 
     # --------------------------------------------------------------- методы
