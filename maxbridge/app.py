@@ -212,6 +212,10 @@ class Application:
                 followup_watcher(account.storage, account.config.followup_minutes, notify),
                 name=f"followup:{account.name}",
             ),
+            # уборка тем: свежие названия вместо «MAX 123…» + удаление мёртвых
+            asyncio.create_task(
+                self.telegram.topic_janitor(account), name=f"topics:{account.name}"
+            ),
         ]
         if account.escalator is not None:
             tasks.append(

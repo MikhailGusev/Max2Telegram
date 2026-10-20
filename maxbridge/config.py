@@ -62,6 +62,9 @@ class Config:
     #: в MAX, если владелец не нажал «Не прочитано». 0 = не авто-читать (только
     #: вручную). Работает только в стелс-режиме.
     auto_read_seconds: int
+    #: через сколько дней удалять темы без живой переписки (ты не писал, от
+    #: собеседника ≤1 сообщения). 0 = не удалять. Только режим форум-тем.
+    topic_cleanup_days: int
     digest_hour: int
     followup_minutes: int
     db_path: Path
@@ -163,6 +166,7 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         ai_base_url=os.getenv("AI_BASE_URL", "").strip(),
         stealth_mode=_bool("STEALTH_MODE", True),
         auto_read_seconds=_int("AUTO_READ_SECONDS", 30),
+        topic_cleanup_days=_int("TOPIC_CLEANUP_DAYS", 2),
         digest_hour=_int("DIGEST_HOUR", 9),
         followup_minutes=_int("FOLLOWUP_MINUTES", 180),
         db_path=Path(os.getenv("DB_PATH", "data/maxbridge.db")),

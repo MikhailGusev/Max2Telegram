@@ -48,6 +48,10 @@ class UserbotTransport(MaxTransport):
         #: id собеседника -> id его личного диалога. Нужно, чтобы /write слал
         #: сообщение в чат, а не в id контакта (это разные числа в MAX).
         self._dialog_by_user: dict[int, int] = {}
+        #: обратная связь: id диалога -> id собеседника. По ней chat_title()
+        #: отдаёт имя, как только оно станет известно (в т.ч. после фонового
+        #: резолва), — и тема «MAX 123…» переименовывается в нормальное имя.
+        self._dialog_peer: dict[int, int] = {}
         self._task: asyncio.Task[None] | None = None
         self._resolving: set[int] = set()
         #: id, чьё имя MAX так и не отдал — не долбим повторно каждое сообщение
@@ -119,6 +123,7 @@ class UserbotTransport(MaxTransport):
                 continue
             if person_id and person_id != self.client.me_id:
                 self._dialog_by_user[person_id] = chat_id
+                self._dialog_peer[chat_id] = person_id
 
     def _dialog_title(self, chat: dict[str, Any]) -> str:
         """Имя собеседника в личном диалоге: участник, который не я."""
@@ -241,7 +246,12 @@ class UserbotTransport(MaxTransport):
                 self._unresolvable.add(user_id)
 
     def chat_title(self, chat_id: int) -> str:
-        return self._titles.get(chat_id, "")
+        title = self._titles.get(chat_id, "")
+        if title:
+            return title
+        # личный диалог: название = имя собеседника, если уже узнали
+        peer = self._dialog_peer.get(chat_id)
+        return self._names.get(peer, "") if peer else ""
 
     @staticmethod
     def _match_tier(name: str, q: str) -> int:
@@ -337,6 +347,15 @@ class UserbotTransport(MaxTransport):
                 sorted(raw.keys()),
             )
 
+        # запоминаем собеседника личного диалога — имя подтянется позже, если
+        # сейчас неизвестно (см. chat_title)
+        if (
+            sender_id
+            and sender_id != self.client.me_id
+            and self._kinds.get(chat_id, "dialog") == "dialog"
+        ):
+            self._dialog_peer.setdefault(chat_id, sender_id)
+
         # в личном диалоге собеседник и есть название чата: если при
         # синхронизации имени ещё не знали, забираем его из первого же письма
         if (
@@ -379,7 +398,7 @@ class UserbotTransport(MaxTransport):
             text=text_val,
             sender_id=sender_id,
             sender_name=sender_name,
-            chat_title=self._titles.get(chat_id, ""),
+            chat_title=self.chat_title(chat_id),
             chat_kind=self._kinds.get(chat_id, "dialog"),
             ts=int(raw.get("time") or 0) or int(time.time() * 1000),
             outgoing=bool(sender_id and sender_id == self.client.me_id),

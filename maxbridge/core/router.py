@@ -26,6 +26,13 @@ from .rules import Verdict
 log = logging.getLogger("maxbridge.router")
 
 
+def is_service_message(message: MaxMessage) -> bool:
+    """Нет текста и нет «настоящих» вложений — только системные (CONTROL) или ничего."""
+    if (message.text or "").strip():
+        return False
+    return all(a.kind == "system" for a in message.attachments)
+
+
 class TelegramSink(Protocol):
     """То, что роутер ожидает от Telegram-стороны."""
 
@@ -62,6 +69,13 @@ class Router:
         self._seen.add(key)
         if len(self._seen) > 5000:  # не даём множеству расти бесконечно
             self._seen = set(list(self._seen)[-2000:])
+
+        # служебные сообщения MAX («контакт теперь в MAX» и т.п.: без текста,
+        # только системное вложение) и пустые — не доставляем. Именно они
+        # плодили мусорные темы «MAX 473269620» с «· неизвестный 📎 system».
+        if not message.outgoing and is_service_message(message):
+            log.debug("служебное сообщение в чате %s — не доставляю", message.chat_id)
+            return
 
         title = message.chat_title or self.transport.chat_title(message.chat_id)
         if not title:

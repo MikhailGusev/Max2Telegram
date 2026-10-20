@@ -346,16 +346,26 @@ class TelegramBridge:
         return sent.message_id
 
     async def _ensure_topic(self, account: Account, message: MaxMessage) -> int:
-        title = message.chat_title or message.sender_name or f"MAX {message.chat_id}"
+        # личный диалог без названия называем именем собеседника; группу по
+        # имени отправителя не называем — у неё должно быть своё название
+        title = message.chat_title or (
+            message.sender_name if message.chat_kind == "dialog" else ""
+        )
         return await self._ensure_topic_by(account, message.chat_id, title, message.chat_kind)
 
     async def _ensure_topic_by(
         self, account: Account, chat_id: int, title: str, kind: str = "dialog"
     ) -> int:
-        """Тема для чата по его id — общий путь для входящих и для /write."""
+        """Тема для чата по его id — общий путь для входящих и для /write.
+
+        Если тема уже есть, но создана под временным именем («MAX 123…»), а
+        теперь настоящее имя известно, — переименовываем её.
+        """
         chat = account.storage.get_chat(chat_id)
         if chat is not None and chat["tg_topic_id"]:
-            return int(chat["tg_topic_id"])
+            topic_id = int(chat["tg_topic_id"])
+            await self._maybe_rename_topic(account, chat_id, topic_id, title, chat)
+            return topic_id
 
         name = title or f"MAX {chat_id}"
         account.storage.upsert_chat(chat_id, title, kind)
@@ -363,6 +373,8 @@ class TelegramBridge:
             chat_id=account.forum_chat_id, name=name[:128]
         )
         account.storage.bind_topic(chat_id, created.message_thread_id)
+        # пустое имя запоминаем пустым — переименуем, когда узнаем настоящее
+        account.storage.set_topic_title(chat_id, title)
         log.info(
             "аккаунт «%s»: создана тема «%s» для чата MAX %s",
             account.name,
@@ -370,6 +382,107 @@ class TelegramBridge:
             chat_id,
         )
         return created.message_thread_id
+
+    # ---------------------------------------------------------- уход за темами
+    async def _maybe_rename_topic(
+        self, account: Account, chat_id: int, topic_id: int, title: str, chat: Any = None
+    ) -> bool:
+        """Переименовывает тему, если настоящее имя чата отличается от того,
+        под которым тема создана. Возвращает True, если пытались переименовать."""
+        if not title:
+            return False
+        if chat is None:
+            chat = account.storage.get_chat(chat_id)
+        current = chat["tg_topic_title"] if chat is not None else ""
+        if title == current:
+            return False
+        try:
+            await self.bot.edit_forum_topic(
+                chat_id=account.forum_chat_id, message_thread_id=topic_id, name=title[:128]
+            )
+            log.info(
+                "аккаунт «%s»: тема чата %s переименована в «%s»", account.name, chat_id, title
+            )
+        except Exception as exc:  # noqa: BLE001 - косметика, не роняем доставку
+            log.debug("не переименовал тему %s: %s", topic_id, exc)
+        # запоминаем в любом случае, чтобы не долбить Telegram повторно
+        account.storage.set_topic_title(chat_id, title)
+        return True
+
+    async def refresh_topic_names(self, account: Account) -> int:
+        """Проход по всем темам: подставить настоящие имена вместо «MAX 123…»."""
+        if not account.forum_chat_id:
+            return 0
+        renamed = 0
+        for chat in account.storage.topic_chats():
+            chat_id = int(chat["max_chat_id"])
+            title = account.transport.chat_title(chat_id) or chat["title"] or ""
+            if await self._maybe_rename_topic(
+                account, chat_id, int(chat["tg_topic_id"]), title, chat
+            ):
+                renamed += 1
+                await asyncio.sleep(0.3)  # не упереться в лимиты Telegram
+        return renamed
+
+    async def cleanup_topics(
+        self, account: Account, *, days: int, dry_run: bool = False
+    ) -> list[tuple[int, str]]:
+        """Удаляет темы без живой переписки старше days дней.
+
+        «Без переписки» = ты в чате не писал, а от собеседника максимум одно
+        сообщение (приветствие и тишина). Важные (⭐) не трогаем. История в базе
+        остаётся; напишут снова — тема создастся заново. dry_run — только список.
+        """
+        if not account.forum_chat_id or days <= 0:
+            return []
+        cutoff = time.time() - days * 86400
+        rows = account.storage.stale_topic_chats(int(cutoff * 1000), int(cutoff))
+        found = [
+            (int(r["max_chat_id"]), r["title"] or f"MAX {r['max_chat_id']}") for r in rows
+        ]
+        if dry_run:
+            return found
+        for row in rows:
+            chat_id, topic_id = int(row["max_chat_id"]), int(row["tg_topic_id"])
+            try:
+                await self.bot.delete_forum_topic(
+                    chat_id=account.forum_chat_id, message_thread_id=topic_id
+                )
+            except TelegramBadRequest as exc:
+                # тему уже удалили руками — просто отвяжем
+                log.debug("тема %s уже недоступна: %s", topic_id, exc)
+            account.storage.bind_topic(chat_id, 0)
+            account.storage.set_topic_title(chat_id, "")
+            log.info(
+                "аккаунт «%s»: удалена тема без переписки — «%s» (чат %s)",
+                account.name,
+                row["title"] or chat_id,
+                chat_id,
+            )
+            await asyncio.sleep(0.3)
+        return found
+
+    async def topic_janitor(self, account: Account, *, interval: float = 6 * 3600) -> None:
+        """Фоновая уборка: раз в 6 часов освежает названия тем и удаляет мёртвые."""
+        await asyncio.sleep(90)  # дать мосту подняться и подтянуть имена
+        while True:
+            try:
+                if account.forum_chat_id:
+                    await self.refresh_topic_names(account)
+                    days = account.config.topic_cleanup_days
+                    if days > 0:
+                        removed = await self.cleanup_topics(account, days=days)
+                        if removed:
+                            log.info(
+                                "аккаунт «%s»: автоочистка удалила тем: %d",
+                                account.name,
+                                len(removed),
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - уборка не должна ронять мост
+                log.exception("уборка тем аккаунта «%s» сорвалась", account.name)
+            await asyncio.sleep(interval)
 
     def _render(
         self,
@@ -476,6 +589,7 @@ class TelegramBridge:
         dp.message.register(self._cmd_license, Command("license"))
         dp.message.register(self._cmd_premium, Command("premium"))
         dp.message.register(self._cmd_grant, Command("grant"))
+        dp.message.register(self._cmd_cleanup, Command("cleanup"))
         dp.message.register(self._cmd_clients, Command("clients"))
         dp.message.register(self._cmd_registration, Command("registration"))
         dp.message.register(self._cmd_help, Command("help"))
@@ -687,6 +801,7 @@ class TelegramBridge:
             "   действия: urgent, mute, autoreply=текст\n"
             "/rules, /rmrule N — список и удаление правил\n"
             "/autoreply текст — автоответ в текущей теме\n"
+            "/cleanup — темы без переписки (now — удалить сразу)\n"
             "/premium — оформить подписку\n"
             "/license — что включено в этой установке"
             f"{owner}",
@@ -868,6 +983,38 @@ class TelegramBridge:
             )
         except TelegramBadRequest:
             pass  # друг ещё не писал боту — узнает сам через /status
+
+    async def _cmd_cleanup(self, message: Message) -> None:
+        """/cleanup — показать мёртвые темы; /cleanup now — удалить; число — дни."""
+        if not await self._guard(message):
+            return
+        account = await self._need_account(message)
+        if account is None:
+            return
+        if not account.forum_chat_id:
+            await message.answer("Очистка тем работает только в режиме группы-форума.")
+            return
+
+        args = _command_arg(message.text).lower().split()
+        go = any(a in {"now", "go", "да", "сейчас"} for a in args)
+        days = next((int(a) for a in args if a.isdigit()), 0)
+        days = days or account.config.topic_cleanup_days or 2
+
+        found = await self.cleanup_topics(account, days=days, dry_run=not go)
+        rule = f"старше {days} дн., ты не писал, от собеседника ≤1 сообщения"
+        if not found:
+            await message.answer(f"Мёртвых тем нет ({rule}).")
+            return
+        names = "\n".join(f"• {html.escape(title)}" for _, title in found[:40])
+        more = f"\n…и ещё {len(found) - 40}" if len(found) > 40 else ""
+        if go:
+            await message.answer(f"Удалил тем: {len(found)}\n{names}{more}", parse_mode="HTML")
+        else:
+            await message.answer(
+                f"Темы без переписки ({rule}): {len(found)}\n{names}{more}\n\n"
+                "Удалить сейчас: /cleanup now",
+                parse_mode="HTML",
+            )
 
     # ------------------------------------------------------ owner-панель SaaS
     async def _cmd_registration(self, message: Message) -> None:

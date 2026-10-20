@@ -106,6 +106,19 @@ class Storage:
             if column not in existing:
                 self._db.execute(f"ALTER TABLE messages ADD COLUMN {column} {ddl}")
 
+        chat_cols = {row["name"] for row in self._db.execute("PRAGMA table_info(chats)")}
+        if "tg_topic_title" not in chat_cols:
+            # под каким именем тема создана в Telegram — чтобы переименовать её,
+            # когда настоящее имя собеседника станет известно позже
+            self._db.execute(
+                "ALTER TABLE chats ADD COLUMN tg_topic_title TEXT NOT NULL DEFAULT ''"
+            )
+            # у старых тем считаем, что они названы текущим title (если он был)
+            self._db.execute(
+                "UPDATE chats SET tg_topic_title = title"
+                " WHERE tg_topic_id IS NOT NULL AND tg_topic_id <> 0 AND title <> ''"
+            )
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
@@ -139,6 +152,46 @@ class Storage:
                 "UPDATE chats SET tg_topic_id = ? WHERE max_chat_id = ?", (topic_id, chat_id)
             )
             self._db.commit()
+
+    def set_topic_title(self, chat_id: int, title: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE chats SET tg_topic_title = ? WHERE max_chat_id = ?", (title, chat_id)
+            )
+            self._db.commit()
+
+    def topic_chats(self) -> list[sqlite3.Row]:
+        """Чаты, у которых есть тема в Telegram."""
+        with self._lock:
+            return list(
+                self._db.execute(
+                    "SELECT * FROM chats WHERE tg_topic_id IS NOT NULL AND tg_topic_id <> 0"
+                ).fetchall()
+            )
+
+    def stale_topic_chats(self, cutoff_ms: int, created_before: int) -> list[sqlite3.Row]:
+        """Темы без живой переписки — кандидаты на автоудаление.
+
+        Тема «мёртвая», если: создана давно (created_before, секунды), последнее
+        сообщение старше cutoff_ms (миллисекунды), владелец в чате НИ РАЗУ не
+        писал, а от собеседника максимум одно текстовое сообщение (приветствие
+        и тишина). Важные чаты (vip) не трогаем никогда.
+        """
+        with self._lock:
+            return list(
+                self._db.execute(
+                    "SELECT c.max_chat_id, c.title, c.tg_topic_id FROM chats c"
+                    " LEFT JOIN messages m ON m.max_chat_id = c.max_chat_id"
+                    " WHERE c.tg_topic_id IS NOT NULL AND c.tg_topic_id <> 0"
+                    " AND c.vip = 0 AND c.created_at <= ?"
+                    " GROUP BY c.max_chat_id"
+                    " HAVING COALESCE(SUM(m.outgoing), 0) = 0"
+                    " AND COALESCE(SUM(CASE WHEN m.outgoing = 0 AND TRIM(m.text) <> ''"
+                    "     THEN 1 ELSE 0 END), 0) <= 1"
+                    " AND COALESCE(MAX(m.ts), 0) <= ?",
+                    (created_before, cutoff_ms),
+                ).fetchall()
+            )
 
     def set_chat_flag(self, chat_id: int, field: str, value: int | str) -> None:
         if field not in {"muted", "vip", "autoreply"}:
