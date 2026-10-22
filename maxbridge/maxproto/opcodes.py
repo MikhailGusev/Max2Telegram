@@ -54,10 +54,14 @@ class Op(IntEnum):
     UPLOAD_FILE = 87
     DOWNLOAD_FILE = 88
 
+    # --- расшифровка голосовых/видео встроенными средствами MAX ---
+    TRANSCRIBE_MEDIA = 202   # запрос: {mediaId, chatId, messageId}
+    EVT_TRANSCRIPTION = 293  # пуш с готовой расшифровкой
+
     # --- входящие события (cmd = 1) ---
     EVT_NEW_MESSAGE = 128
     EVT_UPLOAD_PROGRESS = 136
 
 
 #: опкоды, которые сервер присылает сам (без нашего запроса)
-SERVER_EVENTS = {Op.EVT_NEW_MESSAGE, Op.EVT_UPLOAD_PROGRESS}
+SERVER_EVENTS = {Op.EVT_NEW_MESSAGE, Op.EVT_UPLOAD_PROGRESS, Op.EVT_TRANSCRIPTION}

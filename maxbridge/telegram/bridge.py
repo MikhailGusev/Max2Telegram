@@ -314,6 +314,7 @@ class TelegramBridge:
 
         # голосовое приходит текстом: его можно прочитать глазами, найти
         # поиском и скормить правилам приоритета
+        recognized = ""
         if attachment.kind in {"audio", "voice"} and self.transcriber.enabled:
             recognized = await self.transcriber.transcribe(data, filename)
             if recognized:
@@ -359,7 +360,86 @@ class TelegramBridge:
                 message_thread_id=thread_id,
                 text=f"…и ещё вложений: {len(message.attachments) - 1}",
             )
+
+        # своего распознавания нет — просим MAX расшифровать голосовое и
+        # дописываем текст к уже отправленному сообщению (в фоне, не задерживая
+        # доставку)
+        if attachment.kind in {"audio", "voice"} and not recognized:
+            self._spawn(
+                self._transcribe_later(
+                    account, message, target_chat_id, thread_id, sent.message_id, short
+                )
+            )
         return sent.message_id
+
+    def _spawn(self, coro: Any) -> None:
+        """Фоновая задача с удержанием ссылки (иначе её может собрать GC)."""
+        task = asyncio.create_task(coro)
+        tasks = self.__dict__.setdefault("_bg_tasks", set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    async def _transcribe_later(
+        self,
+        account: Account,
+        message: MaxMessage,
+        chat_id: int,
+        thread_id: int | None,
+        tg_msg_id: int,
+        caption: str,
+    ) -> None:
+        """Расшифровка голосового средствами MAX -> текст под голосовым."""
+        try:
+            text = await account.transport.transcribe_voice(message, 0)
+        except Exception as exc:  # noqa: BLE001 - расшифровка — бонус, не критично
+            log.info("расшифровка голосового не удалась: %s", exc or type(exc).__name__)
+            return
+        if not text:
+            return
+        account.storage.save_transcript(message.chat_id, str(message.message_id), text)
+
+        addition = f"📝 <i>{html.escape(text)}</i>"
+        new_caption = f"{caption}\n\n{addition}" if caption else addition
+        try:
+            if len(new_caption) <= 1024:
+                await self.bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=tg_msg_id,
+                    caption=new_caption,
+                    parse_mode="HTML",
+                    reply_markup=self._current_keyboard(account, message),
+                )
+            else:
+                # длинная расшифровка в подпись не влезает — отдельным ответом
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    reply_to_message_id=tg_msg_id,
+                    text=addition[:4096],
+                    parse_mode="HTML",
+                )
+        except TelegramBadRequest as exc:
+            log.info("не смог дописать расшифровку: %s", exc)
+
+    def _current_keyboard(
+        self, account: Account, message: MaxMessage
+    ) -> InlineKeyboardMarkup | None:
+        """Кнопка сообщения в её текущем состоянии (правка подписи иначе её снесёт)."""
+        key = (account.name, message.chat_id, str(message.message_id))
+        if key in self.__dict__.get("_read_done", set()):
+            return None
+        if key in self.__dict__.get("_read_held", set()):
+            return InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="👁 Прочитано",
+                            callback_data=f"readnow:{message.chat_id}:{message.message_id}",
+                        )
+                    ]
+                ]
+            )
+        return self._keyboard(account, message, Verdict())
 
     async def _ensure_topic(self, account: Account, message: MaxMessage) -> int:
         # личный диалог без названия называем именем собеседника; группу по

@@ -79,6 +79,8 @@ class MaxWSClient:
         self._worker_task: asyncio.Task[None] | None = None
         #: ожидание подтверждения загрузки файла/видео (событие opcode 136)
         self._upload_waiters: dict[str, asyncio.Future[None]] = {}
+        #: ожидание расшифровки голосового (пуш opcode 293): (id-шники, future)
+        self._transcribe_waiters: list[tuple[set[str], asyncio.Future[str]]] = []
         self._http: Any = None  # aiohttp.ClientSession, создаётся лениво
 
         self._device_id: str = ""
@@ -200,9 +202,18 @@ class MaxWSClient:
 
     async def _dispatch(self, packet: dict[str, Any]) -> None:
         seq = packet.get("seq")
-        future = self._pending.get(seq) if isinstance(seq, int) else None
+        # ответ на наш запрос приходит с cmd=1; пакеты, которые сервер шлёт
+        # сам, идут с cmd=0 и своей нумерацией seq — её совпадение с номером
+        # нашего запроса не должно выдавать чужой пакет за ответ
+        is_reply = packet.get("cmd", 1) != 0
+        future = self._pending.get(seq) if isinstance(seq, int) and is_reply else None
         if future is not None and not future.done():
             future.set_result(packet)
+            return
+
+        # готовая расшифровка голосового — отдаём ожидающему transcribe()
+        if packet.get("opcode") == Op.EVT_TRANSCRIPTION:
+            self._on_transcription(packet.get("payload"))
             return
 
         # подтверждение того, что залитый файл обработан на стороне MAX
@@ -606,6 +617,56 @@ class MaxWSClient:
 
         return found
 
+    async def transcribe(
+        self, chat_id: int, message_id: str, media_id: int, *, timeout: float = 90.0
+    ) -> str:
+        """Расшифровка голосового встроенными средствами MAX (опкод 202).
+
+        Текст может прийти сразу в ответе или позже отдельным пушем (опкод 293).
+        Формат обоих в реверс-доках не описан, поэтому текст ищем по вероятным
+        полям, а пуш сопоставляем по mediaId/messageId. Ключи ответа пишем в
+        лог — по ним формат уточняется на живых данных.
+        """
+        mid: Any = int(message_id) if str(message_id).lstrip("-").isdigit() else message_id
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        waiter = ({str(media_id), str(message_id)}, future)
+        self._transcribe_waiters.append(waiter)
+        try:
+            response = await self.invoke(
+                Op.TRANSCRIBE_MEDIA,
+                {"mediaId": int(media_id), "chatId": int(chat_id), "messageId": mid},
+            )
+            payload = response.get("payload")
+            log.info(
+                "расшифровка %s: ответ на запрос, ключи=%s",
+                media_id,
+                sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+            )
+            text = _find_text(payload)
+            if text:
+                return text
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            if waiter in self._transcribe_waiters:
+                self._transcribe_waiters.remove(waiter)
+
+    def _on_transcription(self, payload: Any) -> None:
+        """Пуш 293: отдаём текст тому transcribe(), чьи id есть в пуше."""
+        text = _find_text(payload)
+        log.info(
+            "расшифровка: пришёл пуш, ключи=%s, текст %s",
+            sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+            "есть" if text else "нет",
+        )
+        if not text:
+            return  # промежуточный статус («в работе») — ждём следующий пуш
+        matched = [w for w in self._transcribe_waiters if _contains_any(payload, w[0])]
+        if not matched and len(self._transcribe_waiters) == 1:
+            matched = list(self._transcribe_waiters)  # id в пуше нет, ждём одно — оно
+        for _ids, future in matched:
+            if not future.done():
+                future.set_result(text)
+
     async def download(self, url: str, *, limit_bytes: int = 100 * 1024 * 1024) -> bytes:
         """Скачивает вложение ЦЕЛИКОМ. limit_bytes страхует от гигантских файлов.
 
@@ -714,3 +775,37 @@ class MaxWSClient:
                 "reaction": {"reactionType": "EMOJI", "id": emoji},
             },
         )
+
+
+#: поля, в которых MAX может отдать текст расшифровки (по убыванию уверенности)
+_TEXT_KEYS = ("transcription", "transcript", "recognizedText", "text")
+
+
+def _find_text(obj: Any) -> str:
+    """Первый непустой текст расшифровки в ответе любой вложенности."""
+    if isinstance(obj, dict):
+        for key in _TEXT_KEYS:
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for value in obj.values():
+            found = _find_text(value)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _find_text(item)
+            if found:
+                return found
+    return ""
+
+
+def _contains_any(obj: Any, ids: set[str]) -> bool:
+    """Есть ли где-то в структуре значение, совпадающее с одним из id."""
+    if isinstance(obj, dict):
+        return any(_contains_any(value, ids) for value in obj.values())
+    if isinstance(obj, list):
+        return any(_contains_any(item, ids) for item in obj)
+    if isinstance(obj, (int, str)) and not isinstance(obj, bool):
+        return str(obj) in ids
+    return False

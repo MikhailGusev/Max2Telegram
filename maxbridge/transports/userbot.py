@@ -489,6 +489,19 @@ class UserbotTransport(MaxTransport):
             name = _sniff_name(data, attachment.kind)
         return data, name
 
+    async def transcribe_voice(self, message: MaxMessage, index: int = 0) -> str:
+        """Расшифровка голосового встроенными средствами MAX (опкод 202)."""
+        if index >= len(message.attachments):
+            return ""
+        raw = message.attachments[index].raw
+        media_id = raw.get("audioId") if raw.get("audioId") is not None else raw.get("videoId")
+        if media_id is None:
+            return ""
+        # пересланное — по координатам оригинала, как и скачивание
+        chat_id = int(raw.get("_fwd_chat") or message.chat_id)
+        message_id = str(raw.get("_fwd_msg") or message.message_id)
+        return await self.client.transcribe(chat_id, message_id, int(media_id))
+
     async def _download_audio(self, chat_id: int, message_id: str, audio_id: int) -> bytes:
         """Скачивает голосовое: перебирает ссылки-кандидаты, пока одна не отдаст файл."""
         candidates = await self.client.audio_candidates(chat_id, message_id, audio_id)

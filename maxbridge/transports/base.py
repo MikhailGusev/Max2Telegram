@@ -65,6 +65,10 @@ class MaxTransport(abc.ABC):
         """Отправляет файл в чат MAX. kind: photo | video | file."""
         raise NotImplementedError("этот транспорт не умеет отправлять файлы")
 
+    async def transcribe_voice(self, message: MaxMessage, index: int = 0) -> str:
+        """Текст голосового средствами самого MAX. Пусто — расшифровки нет."""
+        return ""
+
     async def mark_read(self, chat_id: int, message_id: str) -> None:
         """Помечает прочитанным. В стелс-режиме роутер это просто не вызывает."""
         return None
