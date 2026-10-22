@@ -330,7 +330,14 @@ class TelegramBridge:
             elif attachment.kind == "video":
                 sent = await self.bot.send_video(video=file, **common)
             elif attachment.kind in {"audio", "voice"}:
-                sent = await self.bot.send_voice(voice=file, **common)
+                try:
+                    sent = await self.bot.send_voice(voice=file, **common)
+                except TelegramBadRequest as exc:
+                    # голосовым не взял (формат, запрет голосовых в чате) —
+                    # отдаём файлом, чтобы запись не потерялась
+                    log.info("голосовым не принял (%s) — отправляю файлом", exc)
+                    file = BufferedInputFile(data, filename=filename)
+                    sent = await self.bot.send_document(document=file, **common)
             else:
                 sent = await self.bot.send_document(document=file, **common)
         except TelegramBadRequest as exc:

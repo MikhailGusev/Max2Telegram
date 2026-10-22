@@ -563,6 +563,31 @@ class MaxWSClient:
                 return value
         return ""
 
+    async def audio_url(self, chat_id: int, message_id: str, audio_id: int) -> str:
+        """Ссылка на голосовое/аудио по audioId.
+
+        Отдельного опкода скачивания аудио в реверс-доках нет, а во вложении
+        ссылки не приходит. Аудио MAX лежит на той же OK-инфраструктуре, что и
+        видео, поэтому пробуем по очереди: VIDEO_PLAY (83) с videoId=audioId,
+        затем FILE_DOWNLOAD (88) с fileId=audioId. Какой путь сработал — в лог,
+        чтобы со временем оставить только его.
+        """
+        attempts = (
+            ("83/video", self.video_url),
+            ("88/file", self.file_url),
+        )
+        for label, getter in attempts:
+            try:
+                url = await asyncio.wait_for(getter(chat_id, message_id, audio_id), timeout=10)
+            except Exception as exc:  # noqa: BLE001 - пробуем следующий путь
+                log.info("аудио %s: путь %s не сработал: %s", audio_id, label, exc or type(exc).__name__)
+                continue
+            if url:
+                log.info("аудио %s: ссылку дал путь %s", audio_id, label)
+                return url
+            log.info("аудио %s: путь %s вернул пустую ссылку", audio_id, label)
+        return ""
+
     async def download(self, url: str, *, limit_bytes: int = 100 * 1024 * 1024) -> bytes:
         """Скачивает вложение ЦЕЛИКОМ. limit_bytes страхует от гигантских файлов.
 

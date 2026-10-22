@@ -170,7 +170,7 @@ class UserbotTransport(MaxTransport):
         task.add_done_callback(self._resolve_tasks.discard)
 
     def _schedule_members(self, chat_id: int) -> None:
-        """Один раз на группу подтягивает список участников (для имён)."""
+        """Один раз на чат за сессию подтягивает список участников (для имён)."""
         if chat_id in self._members_loaded:
             return
         self._members_loaded.add(chat_id)
@@ -194,8 +194,9 @@ class UserbotTransport(MaxTransport):
                 timeout=10,
             )
         except Exception as exc:  # noqa: BLE001 - имена не критичны для доставки
-            log.debug("не смог получить участников группы %s: %s", chat_id, exc)
-            self._members_loaded.discard(chat_id)  # дать шанс повторить позже
+            # одна попытка на чат за сессию: для личных диалогов опкод может не
+            # поддерживаться, и повтор на каждом сообщении был бы спамом
+            log.debug("не смог получить участников чата %s: %s", chat_id, exc)
             return
         members = (response.get("payload") or {}).get("members") or []
         before = len(self._names)
@@ -203,7 +204,7 @@ class UserbotTransport(MaxTransport):
             if isinstance(member, dict):
                 self._remember_person(member)
         log.info(
-            "группа %s: участников %d, новых имён +%d",
+            "чат %s: участников %d, новых имён +%d",
             chat_id,
             len(members),
             len(self._names) - before,
@@ -327,13 +328,15 @@ class UserbotTransport(MaxTransport):
 
         sender_id = int(raw.get("sender") or raw.get("senderId") or 0)
         if sender_id and sender_id not in self._names:
-            # в группе имена берём из списка участников (опкод 59 — работает),
-            # в личных диалогах — точечным resolve (опкод 32). Оба в фоне, чтобы
-            # не блокировать доставку ожиданием ответа MAX.
+            # в группе имена берём из списка участников (опкод 59 — работает).
+            # В личном диалоге — resolve (опкод 32), а так как на людей не из
+            # контактов он имени не отдаёт, один раз пробуем и список участников
+            # диалога. Всё в фоне, чтобы не блокировать доставку.
             if self._kinds.get(chat_id) == "chat":
                 self._schedule_members(chat_id)
             else:
                 self._schedule_resolve(sender_id)
+                self._schedule_members(chat_id)
 
         sender_name = self._names.get(sender_id, "")
         if not sender_name and sender_id != self.client.me_id:
@@ -495,12 +498,19 @@ class UserbotTransport(MaxTransport):
             url = await self.client.video_url(dl_chat, dl_msg, int(raw["videoId"]))
         elif raw.get("fileId") is not None:
             url = await self.client.file_url(dl_chat, dl_msg, int(raw["fileId"]))
+        elif raw.get("audioId") is not None:
+            url = await self.client.audio_url(dl_chat, dl_msg, int(raw["audioId"]))
 
         if not url:
             raise ValueError(f"не смог определить ссылку на вложение «{attachment.kind}»")
 
         data = await self.client.download(url)
-        return data, attachment.name or _default_name(attachment.kind)
+        name = attachment.name
+        if not name:
+            # у голосовых имени нет — расширение по содержимому, чтобы Telegram
+            # и плееры правильно поняли формат
+            name = _sniff_name(data, attachment.kind)
+        return data, name
 
     async def send_media(
         self,
@@ -564,6 +574,23 @@ def _extract_name(data: dict[str, Any]) -> str:
     return str(data.get("name") or data.get("firstName") or "")
 
 
+def _sniff_name(data: bytes, kind: str) -> str:
+    """Имя файла с расширением по сигнатуре содержимого (для безымянных медиа)."""
+    head = data[:12]
+    if head.startswith(b"OggS"):
+        ext = "ogg"
+    elif head.startswith(b"ID3") or head[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        ext = "mp3"
+    elif head[4:8] == b"ftyp":
+        ext = "m4a" if kind in {"audio", "voice"} else "mp4"
+    elif head.startswith(b"RIFF"):
+        ext = "wav"
+    else:
+        return _default_name(kind)
+    base = "voice" if kind in {"audio", "voice"} else kind or "file"
+    return f"{base}.{ext}"
+
+
 def _default_name(kind: str) -> str:
     return {
         "photo": "image.jpg",
@@ -579,9 +606,21 @@ def _parse_attaches(attaches: list[Any]) -> list[Attachment]:
         if not isinstance(item, dict):
             continue
         raw_kind = str(item.get("_type") or item.get("type") or "").upper()
+        kind = ATTACH_KINDS.get(raw_kind, "")
+        if not kind:
+            # тип неизвестен или UNSUPPORTED (так MAX шлёт голосовые нашему
+            # web-клиенту) — определяем по идентификатору внутри вложения
+            if item.get("audioId") is not None:
+                kind = "audio"
+            elif item.get("videoId") is not None:
+                kind = "video"
+            elif item.get("fileId") is not None:
+                kind = "file"
+            else:
+                kind = raw_kind.lower() or "unknown"
         result.append(
             Attachment(
-                kind=ATTACH_KINDS.get(raw_kind, raw_kind.lower() or "unknown"),
+                kind=kind,
                 url=str(item.get("url") or item.get("baseUrl") or ""),
                 name=str(item.get("name") or item.get("fileName") or ""),
                 raw=item,
