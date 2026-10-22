@@ -33,7 +33,10 @@ log = logging.getLogger("maxbridge.maxproto")
 WS_URL = "wss://ws-api.oneme.ru/websocket"
 WEB_ORIGIN = "https://web.max.ru"
 RPC_VERSION = 11
-APP_VERSION = "26.2.2"
+#: версия веб-клиента в HELLO. С устаревшей (26.2.2) сервер урезал голосовые до
+#: UNSUPPORTED без ссылки; 26.10.1 — как у живого web.max.ru. В .env можно
+#: переопределить (MAX_APP_VERSION) без правки кода.
+APP_VERSION = "26.10.1"
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/141.0.0.0 Safari/537.36"
@@ -536,21 +539,12 @@ class MaxWSClient:
         mid: Any = message_id
         if str(message_id).lstrip("-").isdigit():
             mid = int(message_id)
-        log.debug(
-            "ЗОНД скачивания: DOWNLOAD_FILE fileId=%s messageId=%s тип=%s",
-            file_id,
-            message_id,
-            type(mid).__name__,
-        )
         response = await self.invoke(
             Op.DOWNLOAD_FILE,
             {"fileId": int(file_id), "chatId": int(chat_id), "messageId": mid},
         )
         payload = response.get("payload") or {}
-        url = str(payload.get("url") or "")
-        if not url:
-            log.debug("ЗОНД скачивания: DOWNLOAD_FILE вернул ключи=%s", sorted(payload.keys()))
-        return url
+        return str(payload.get("url") or "")
 
     async def video_url(self, chat_id: int, message_id: str, video_id: int) -> str:
         """Прямая ссылка на видео. MAX отдаёт несколько качеств — берём первое."""

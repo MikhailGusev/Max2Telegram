@@ -410,30 +410,6 @@ class UserbotTransport(MaxTransport):
             raw=raw,
         )
 
-        # зонд сообщений-файлов: показывает, распознали ли вложение и его форму.
-        # Срабатывает и на «пустые» (текста и вложений нет — вероятно файл в
-        # другом поле), и на распознанные (сколько attaches, ключи первого).
-        if not message.outgoing and (attaches_raw or (not message.text and not message.attachments)):
-            sample = attaches_raw[0] if attaches_raw and isinstance(attaches_raw[0], dict) else None
-            link = raw.get("link")
-            link_info = "нет"
-            if isinstance(link, dict):
-                inner = link.get("message") if isinstance(link.get("message"), dict) else {}
-                link_info = (
-                    sorted(link.keys()),
-                    str(link.get("type")),
-                    ("message.ключи", sorted(inner.keys())) if inner else "",
-                )
-            log.debug(
-                "ЗОНД сообщения: attaches=%d распознано=%d ключи=%s link=%s %s",
-                len(attaches_raw),
-                len(message.attachments),
-                sorted(raw.keys()),
-                link_info,
-                (sorted(sample.keys()), str(sample.get("_type") or sample.get("type")))
-                if sample else "attaches пуст",
-            )
-
         await self._emit(message)
 
     # ---------------------------------------------------------------- методы
