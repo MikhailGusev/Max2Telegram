@@ -36,42 +36,81 @@ def test_sniff_name_by_signature() -> None:
     assert _sniff_name(b"????", "audio") == "audio.ogg", "неизвестный формат — имя по умолчанию"
 
 
-async def test_audio_url_falls_back_to_file_download(tmp_path: Path) -> None:
+async def test_audio_candidates_collects_all_links(tmp_path: Path) -> None:
+    """Из ответа 83 берём ВСЕ http-ссылки (служебные — в конец) плюс ссылку из 88."""
     client = MaxWSClient(tmp_path / "s.json")
-    tried = []
 
-    async def video_url(chat_id, message_id, vid):  # noqa: ANN001
-        tried.append(("83", vid))
+    async def fake_invoke(opcode, payload):  # noqa: ANN001
+        return {
+            "payload": {
+                "cache": "https://cache/x",
+                "MP4_480": "https://okcdn/a480",
+                "failoverHost": "host.example",
+            }
+        }
+
+    async def file_url(chat_id, message_id, fid):  # noqa: ANN001
+        return "https://files/voice"
+
+    client.invoke = fake_invoke  # type: ignore[assignment]
+    client.file_url = file_url  # type: ignore[assignment]
+    labels = [label for label, _ in await client.audio_candidates(-1, "m1", 777)]
+    assert labels == ["83/MP4_480", "83/cache", "88/url"]
+
+
+async def test_audio_candidates_survive_failures(tmp_path: Path) -> None:
+    client = MaxWSClient(tmp_path / "s.json")
+
+    async def fake_invoke(opcode, payload):  # noqa: ANN001
         raise MaxProtocolError("MAX вернул ошибку на opcode 83: not.found")
 
     async def file_url(chat_id, message_id, fid):  # noqa: ANN001
-        tried.append(("88", fid))
-        return "https://okcdn/voice"
+        return "https://files/voice"
 
-    client.video_url = video_url  # type: ignore[assignment]
+    client.invoke = fake_invoke  # type: ignore[assignment]
     client.file_url = file_url  # type: ignore[assignment]
-    assert await client.audio_url(-1, "m1", 777) == "https://okcdn/voice"
-    assert tried == [("83", 777), ("88", 777)]
+    assert await client.audio_candidates(-1, "m1", 777) == [("88/url", "https://files/voice")]
 
 
-async def test_fetch_voice_downloads_by_audio_id() -> None:
+async def test_voice_download_skips_broken_link() -> None:
+    """Первая ссылка отдаёт 404 — берём следующую, голосовое доходит."""
     transport = UserbotTransport("не-важно.json")
     calls = {}
 
-    async def audio_url(chat_id, message_id, audio_id):  # noqa: ANN001
-        calls["audio"] = (chat_id, message_id, audio_id)
-        return "https://okcdn/voice"
+    async def audio_candidates(chat_id, message_id, audio_id):  # noqa: ANN001
+        calls["args"] = (chat_id, message_id, audio_id)
+        return [("83/MP4", "https://okcdn/bad"), ("88/url", "https://files/good")]
 
     async def download(url):  # noqa: ANN001
+        if url.endswith("bad"):
+            raise MaxProtocolError("скачивание не удалось: HTTP 404")
         return b"OggS\x00voice-bytes"
 
-    transport.client.audio_url = audio_url  # type: ignore[assignment]
+    transport.client.audio_candidates = audio_candidates  # type: ignore[assignment]
     transport.client.download = download  # type: ignore[assignment]
 
     msg = MaxMessage(chat_id=-5, message_id="m9", attachments=_parse_attaches([VOICE]))
     data, name = await transport.fetch_attachment(msg, 0)
-    assert calls["audio"] == (-5, "m9", 777)
+    assert calls["args"] == (-5, "m9", 777)
     assert data.startswith(b"OggS") and name == "voice.ogg"
+
+
+async def test_voice_download_reports_all_failures() -> None:
+    import pytest
+
+    transport = UserbotTransport("не-важно.json")
+
+    async def audio_candidates(chat_id, message_id, audio_id):  # noqa: ANN001
+        return [("83/MP4", "https://okcdn/bad")]
+
+    async def download(url):  # noqa: ANN001
+        raise MaxProtocolError("скачивание не удалось: HTTP 404")
+
+    transport.client.audio_candidates = audio_candidates  # type: ignore[assignment]
+    transport.client.download = download  # type: ignore[assignment]
+    msg = MaxMessage(chat_id=-5, message_id="m9", attachments=_parse_attaches([VOICE]))
+    with pytest.raises(ValueError, match="83/MP4"):
+        await transport.fetch_attachment(msg, 0)
 
 
 async def test_unknown_dialog_sender_tries_members_too() -> None:

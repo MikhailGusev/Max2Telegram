@@ -498,8 +498,9 @@ class UserbotTransport(MaxTransport):
             url = await self.client.video_url(dl_chat, dl_msg, int(raw["videoId"]))
         elif raw.get("fileId") is not None:
             url = await self.client.file_url(dl_chat, dl_msg, int(raw["fileId"]))
-        elif raw.get("audioId") is not None:
-            url = await self.client.audio_url(dl_chat, dl_msg, int(raw["audioId"]))
+        elif raw.get("audioId") is not None and not url:
+            data = await self._download_audio(dl_chat, dl_msg, int(raw["audioId"]))
+            return data, attachment.name or _sniff_name(data, attachment.kind)
 
         if not url:
             raise ValueError(f"не смог определить ссылку на вложение «{attachment.kind}»")
@@ -511,6 +512,23 @@ class UserbotTransport(MaxTransport):
             # и плееры правильно поняли формат
             name = _sniff_name(data, attachment.kind)
         return data, name
+
+    async def _download_audio(self, chat_id: int, message_id: str, audio_id: int) -> bytes:
+        """Скачивает голосовое: перебирает ссылки-кандидаты, пока одна не отдаст файл."""
+        candidates = await self.client.audio_candidates(chat_id, message_id, audio_id)
+        errors: list[str] = []
+        for label, url in candidates:
+            try:
+                data = await self.client.download(url)
+            except Exception as exc:  # noqa: BLE001 - пробуем следующую ссылку
+                errors.append(f"{label}: {exc}")
+                continue
+            if data:
+                log.info("аудио %s: скачано через %s (%d байт)", audio_id, label, len(data))
+                return data
+            errors.append(f"{label}: пусто")
+        detail = "; ".join(errors) or "ни одной ссылки"
+        raise ValueError(f"голосовое не скачалось ({detail})")
 
     async def send_media(
         self,

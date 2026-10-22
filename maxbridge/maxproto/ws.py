@@ -563,30 +563,48 @@ class MaxWSClient:
                 return value
         return ""
 
-    async def audio_url(self, chat_id: int, message_id: str, audio_id: int) -> str:
-        """Ссылка на голосовое/аудио по audioId.
+    async def audio_candidates(
+        self, chat_id: int, message_id: str, audio_id: int
+    ) -> list[tuple[str, str]]:
+        """Все ссылки-кандидаты на голосовое/аудио по audioId: [(метка, url)].
 
         Отдельного опкода скачивания аудио в реверс-доках нет, а во вложении
-        ссылки не приходит. Аудио MAX лежит на той же OK-инфраструктуре, что и
-        видео, поэтому пробуем по очереди: VIDEO_PLAY (83) с videoId=audioId,
-        затем FILE_DOWNLOAD (88) с fileId=audioId. Какой путь сработал — в лог,
-        чтобы со временем оставить только его.
+        ссылки не приходит. Аудио MAX лежит на OK-инфраструктуре, как и видео,
+        поэтому собираем ВСЕ http-ссылки из ответа VIDEO_PLAY (83) с
+        videoId=audioId и ссылку FILE_DOWNLOAD (88) с fileId=audioId. Первая
+        попавшаяся из 83 оказалась битой (404), так что скачивающий перебирает
+        кандидатов по очереди.
         """
-        attempts = (
-            ("83/video", self.video_url),
-            ("88/file", self.file_url),
-        )
-        for label, getter in attempts:
-            try:
-                url = await asyncio.wait_for(getter(chat_id, message_id, audio_id), timeout=10)
-            except Exception as exc:  # noqa: BLE001 - пробуем следующий путь
-                log.info("аудио %s: путь %s не сработал: %s", audio_id, label, exc or type(exc).__name__)
-                continue
+        mid: Any = int(message_id) if str(message_id).lstrip("-").isdigit() else message_id
+        found: list[tuple[str, str]] = []
+
+        try:
+            response = await asyncio.wait_for(
+                self.invoke(
+                    Op.DOWNLOAD_VIDEO,
+                    {"videoId": int(audio_id), "chatId": int(chat_id), "messageId": mid},
+                ),
+                timeout=10,
+            )
+            payload = response.get("payload") or {}
+            log.info("аудио %s: путь 83 вернул ключи=%s", audio_id, sorted(payload.keys()))
+            service = ("cache", "EXTERNAL", "failoverHost", "liveDvr")
+            # сначала «обычные» ключи качества, служебные — в конец
+            for key in sorted(payload, key=lambda k: k in service):
+                value = payload[key]
+                if isinstance(value, str) and value.startswith("http"):
+                    found.append((f"83/{key}", value))
+        except Exception as exc:  # noqa: BLE001 - пробуем другой путь
+            log.info("аудио %s: путь 83 не сработал: %s", audio_id, exc or type(exc).__name__)
+
+        try:
+            url = await asyncio.wait_for(self.file_url(chat_id, message_id, audio_id), timeout=10)
             if url:
-                log.info("аудио %s: ссылку дал путь %s", audio_id, label)
-                return url
-            log.info("аудио %s: путь %s вернул пустую ссылку", audio_id, label)
-        return ""
+                found.append(("88/url", url))
+        except Exception as exc:  # noqa: BLE001
+            log.info("аудио %s: путь 88 не сработал: %s", audio_id, exc or type(exc).__name__)
+
+        return found
 
     async def download(self, url: str, *, limit_bytes: int = 100 * 1024 * 1024) -> bytes:
         """Скачивает вложение ЦЕЛИКОМ. limit_bytes страхует от гигантских файлов.
