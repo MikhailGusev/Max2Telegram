@@ -62,6 +62,15 @@ def _command_arg(text: str | None) -> str:
     parts = (text or "").split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
 
+def _voice_label(duration: Any) -> str:
+    """Строка вместо «📎 audio», когда голосовое не удалось переложить файлом."""
+    text = "🎤 голосовое"
+    if isinstance(duration, (int, float)) and duration > 0:
+        seconds = int(duration // 1000 if duration >= 1000 else duration)  # мс или с
+        text += f" {seconds // 60}:{seconds % 60:02d}"
+    return text + " — слушать в MAX"
+
+
 #: боты Telegram не могут ни скачивать, ни отправлять файлы больше 50 МБ
 MAX_TELEGRAM_UPLOAD = 50 * 1024 * 1024
 
@@ -519,6 +528,9 @@ class TelegramBridge:
         # дублировать незачем.
         if with_attachments:
             for attachment in message.attachments:
+                if attachment.kind in {"audio", "voice"} and not attachment.url:
+                    parts.append(_voice_label(attachment.raw.get("duration")))
+                    continue
                 label = attachment.name or attachment.kind
                 if attachment.url:
                     parts.append(

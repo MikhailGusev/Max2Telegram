@@ -17,6 +17,7 @@ import asyncio
 import itertools
 import json
 import logging
+import os
 import random
 import uuid
 from pathlib import Path
@@ -249,6 +250,11 @@ class MaxWSClient:
     # ----------------------------------------------------------- авторизация
     async def _hello(self, device_id: str | None = None) -> dict[str, Any]:
         self._device_id = device_id or self._device_id or str(uuid.uuid4())
+        # версию можно переопределить в .env (MAX_APP_VERSION): со старой версией
+        # сервер урезает голосовые до UNSUPPORTED без ссылки. Читаем при каждом
+        # HELLO, а не при импорте — .env загружается позже импорта модуля.
+        app_version = os.getenv("MAX_APP_VERSION", "").strip() or APP_VERSION
+        log.info("MAX: представляемся веб-клиентом версии %s", app_version)
         return await self.invoke(
             Op.HELLO,
             {
@@ -259,7 +265,7 @@ class MaxWSClient:
                     "osVersion": "Linux",
                     "deviceName": "MaxBridge",
                     "headerUserAgent": USER_AGENT,
-                    "appVersion": APP_VERSION,
+                    "appVersion": app_version,
                     "screen": "1080x1920 1.0x",
                     "timezone": "Europe/Moscow",
                 },

@@ -145,3 +145,31 @@ async def test_unknown_dialog_sender_tries_members_too() -> None:
 
     assert int(Op.GET_MEMBERS) in opcodes
     assert transport.chat_title(40240807) == "Антон", "тема переименуется в имя собеседника"
+
+
+async def test_hello_uses_app_version_from_env(tmp_path: Path, monkeypatch) -> None:
+    """MAX_APP_VERSION из .env подменяет версию клиента в HELLO; без неё — дефолт."""
+    from maxbridge.maxproto import ws as ws_module
+
+    client = MaxWSClient(tmp_path / "s.json")
+    sent = []
+
+    async def fake_invoke(opcode, payload):  # noqa: ANN001
+        sent.append(payload["userAgent"]["appVersion"])
+        return {"payload": {}}
+
+    client.invoke = fake_invoke  # type: ignore[assignment]
+
+    monkeypatch.delenv("MAX_APP_VERSION", raising=False)
+    await client._hello()
+    monkeypatch.setenv("MAX_APP_VERSION", "26.10.1")
+    await client._hello()
+    assert sent == [ws_module.APP_VERSION, "26.10.1"]
+
+
+def test_voice_fallback_label() -> None:
+    from maxbridge.telegram.bridge import _voice_label
+
+    assert _voice_label(5) == "🎤 голосовое 0:05 — слушать в MAX"
+    assert _voice_label(75000) == "🎤 голосовое 1:15 — слушать в MAX", "миллисекунды"
+    assert _voice_label(None) == "🎤 голосовое — слушать в MAX"
